@@ -1,2 +1,2 @@
 [workspace]
-members = ["./crates/*", "crates/eli-lab"]
+members = ["./crates/*", "crates/eli-edge", "crates/eli-lab", "crates/elux"]

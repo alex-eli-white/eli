@@ -76,7 +76,7 @@ pub fn dft(samples: &[f64]) -> Vec<Complex<f64>> {
     output
 }
 
-pub fn fft(x: &[Complex<f64>]) -> Vec<Complex<f64>> {
+pub fn recursive_fft(x: &[Complex<f64>]) -> Vec<Complex<f64>> {
     let n = x.len();
 
     if n <= 1 {
@@ -86,8 +86,8 @@ pub fn fft(x: &[Complex<f64>]) -> Vec<Complex<f64>> {
     let even: Vec<_> = x.iter().step_by(2).cloned().collect();
     let odd: Vec<_> = x.iter().skip(1).step_by(2).cloned().collect();
 
-    let even_fft = fft(&even);
-    let odd_fft = fft(&odd);
+    let even_fft = recursive_fft(&even);
+    let odd_fft = recursive_fft(&odd);
 
     let mut combined = vec![Complex::new(0.0, 0.0); n];
 
@@ -99,4 +99,46 @@ pub fn fft(x: &[Complex<f64>]) -> Vec<Complex<f64>> {
     }
 
     combined
+}
+
+pub fn generate_signal(freq: f64, sample_rate: f64, n_samples: usize) -> Vec<f64> {
+    (0..n_samples)
+        .map(|n| {
+            let t = n as f64 / sample_rate;
+            (2.0 * PI * freq * t).cos()
+        })
+        .collect()
+}
+
+/// Mix (frequency shift) a signal using a local oscillator
+pub fn mix_signal(signal: &[f64], lo_freq: f64, sample_rate: f64) -> Vec<f64> {
+    signal
+        .iter()
+        .enumerate()
+        .map(|(n, &x)| {
+            let t = n as f64 / sample_rate;
+            let lo = (2.0 * PI * lo_freq * t).cos();
+            x * lo
+        })
+        .collect()
+}
+
+fn generate_sinusoid(freq: f64, amp: f64, phase: f64, fs: f64, duration: f64) -> Vec<f64> {
+    let samples = (duration * fs) as usize;
+
+    let mut data = Vec::with_capacity(samples);
+
+    for n in 0..samples {
+        let n = n as f64;
+
+        let value = amp * (2.0 * std::f64::consts::PI * (freq / fs) * n + phase).sin();
+
+        data.push(value);
+    }
+
+    data
+}
+
+fn multiply_signals(a: &[f64], b: &[f64]) -> Vec<f64> {
+    a.iter().zip(b.iter()).map(|(x, m)| x * m).collect()
 }
