@@ -1,7 +1,12 @@
 mod capture;
+mod dsp;
+
+use dsp::dafft::compute_fft;
 
 use capture::discovery::{discover_rtlsdr_devices, open_first_rtlsdr};
 use capture::stream::RtlStream;
+
+use num_complex::Complex32;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let devices = discover_rtlsdr_devices()?;
@@ -36,17 +41,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     stream.activate()?;
 
+    let fft_size = 4096;
+
     for chunk_idx in 0..5 {
         let samples = stream.read_samples(1_000_000)?;
 
-        println!("\nchunk {chunk_idx}: {} IQ samples", samples.len());
-
-        for (i, sample) in samples.iter().take(8).enumerate() {
-            println!("  sample {:>2}: I={:+.4}, Q={:+.4}", i, sample.i, sample.q);
+        if samples.len() < fft_size {
+            continue;
         }
+
+        let chunk = &samples[..fft_size];
+
+        let complex = chunk.iter().map(|s| Complex32::new(s.i, s.q)).collect::<Vec<_>>();
+
+        let centered = remove_dc(&complex);
+        let spectrum = compute_fft(&centered);
+        
+
+
+        let (max_idx, max_val) = spectrum
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+
+        println!("\nchunk {chunk_idx}:");
+        println!("  strongest bin: {} (magnitude {:.4})", max_idx, max_val);
     }
 
     stream.deactivate()?;
 
     Ok(())
+}
+
+
+
+pub fn remove_dc(samples: &[Complex32]) -> Vec<Complex32> {
+    let len = samples.len() as f32;
+
+    let mean_i = samples.iter().map(|s| s.re).sum::<f32>() / len;
+    let mean_q = samples.iter().map(|s| s.im).sum::<f32>() / len;
+
+    samples
+        .iter()
+        .map(|s| Complex32::new(s.re - mean_i, s.im - mean_q))
+        .collect()
 }
