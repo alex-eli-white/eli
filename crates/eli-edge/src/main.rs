@@ -1,42 +1,52 @@
-use soapysdr::{Device, Direction};
+mod capture;
+
+use capture::discovery::{discover_rtlsdr_devices, open_first_rtlsdr};
+use capture::stream::RtlStream;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Discover devices
-    let results = soapysdr::enumerate("")?;
+    let devices = discover_rtlsdr_devices()?;
 
-    if results.is_empty() {
-        println!("No SDR devices found");
+    if devices.is_empty() {
+        println!("No RTL-SDR devices found");
         return Ok(());
     }
 
-    println!("Found {} device(s)\n", results.len());
+    println!("Found {} RTL-SDR device(s)\n", devices.len());
 
-    for (i, args) in results.into_iter().enumerate() {
-        println!("Device {}:", i);
-
-        for (k, v) in args.iter() {
-            println!("  {}: {}", k, v);
-        }
-
-        // Open the device
-        let dev = Device::new(args)?;
-
-        println!("  Driver: {}", dev.driver_key()?);
-        println!("  Hardware: {}", dev.hardware_key()?);
-
-        let rx_channels = dev.num_channels(Direction::Rx)?;
-        println!("  RX channels: {}", rx_channels);
-
-        if rx_channels > 0 {
-            let rates = dev.sample_rate(Direction::Rx, 0)?;
-            println!("  Sample rates: {:?}", rates);
-
-            let ranges = dev.frequency_range(Direction::Rx, 0)?;
-            println!("  Frequency ranges: {:?}", ranges);
-        }
-
+    for (idx, dev) in devices.iter().enumerate() {
+        println!("Device {idx}:");
+        println!("  driver: {}", dev.driver);
+        println!("  label: {:?}", dev.label);
+        println!("  manufacturer: {:?}", dev.manufacturer);
+        println!("  product: {:?}", dev.product);
+        println!("  serial: {:?}", dev.serial);
+        println!("  tuner: {:?}", dev.tuner);
+        println!("  rx_channels: {}", dev.rx_channels);
+        println!("  current_sample_rate: {:?}", dev.current_sample_rate);
+        println!("  frequency_ranges: {:?}", dev.frequency_ranges);
         println!();
     }
+
+    let dev = open_first_rtlsdr()?;
+    let mut stream = RtlStream::open(dev, 100_000_000.0, 2_048_000.0)?;
+
+    println!("Configured:");
+    println!("  sample rate: {}", stream.current_sample_rate()?);
+    println!("  frequency:   {}", stream.current_frequency()?);
+
+    stream.activate()?;
+
+    for chunk_idx in 0..5 {
+        let samples = stream.read_samples(1_000_000)?;
+
+        println!("\nchunk {chunk_idx}: {} IQ samples", samples.len());
+
+        for (i, sample) in samples.iter().take(8).enumerate() {
+            println!("  sample {:>2}: I={:+.4}, Q={:+.4}", i, sample.i, sample.q);
+        }
+    }
+
+    stream.deactivate()?;
 
     Ok(())
 }
