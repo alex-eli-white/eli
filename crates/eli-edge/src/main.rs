@@ -1,13 +1,68 @@
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
+    response::Response,
+    routing::get,
+    Router,
+};
+use serde::Serialize;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 use eli_edge::capture::discovery::{discover_rtlsdr_devices, open_first_rtlsdr};
 use eli_edge::capture::stream::RtlStream;
 use eli_edge::scanner::dwell_capture::{dwell_capture, SettleStrategy};
 use eli_edge::scanner::fft_analysis::analyze;
+use eli_edge::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
 use eli_edge::scanner::sweep_planner::{SweepPlanner, SweepPlannerConfig};
-use eli_edge::scanner::vanilla::{ScanHit, SweepRecord};
+use eli_edge::scanner::vanilla::SweepRecord;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Clone)]
+struct AppState {
+    record_tx: broadcast::Sender<RecordMessage>,
+    hit_tx: broadcast::Sender<HitMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecordMessage {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    source_id: String,
+    timestamp_ms: u64,
+    center_hz: f64,
+    lower_edge_hz: f64,
+    upper_edge_hz: f64,
+    avg_power: f32,
+    noise_floor: f32,
+    peak_power: f32,
+    peak_bin: usize,
+    estimated_peak_hz: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HitMessage {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    source_id: String,
+    timestamp_ms: u64,
+    center_hz: f64,
+    peak_hz: f64,
+    lower_edge_hz: f64,
+    upper_edge_hz: f64,
+    peak_bin: usize,
+    peak_power: f32,
+    noise_floor: f32,
+    avg_power: f32,
+    snr_db: f32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let devices = discover_rtlsdr_devices()?;
 
     if devices.is_empty() {
@@ -31,9 +86,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
+    let (record_tx, _) = broadcast::channel::<RecordMessage>(256);
+    let (hit_tx, _) = broadcast::channel::<HitMessage>(256);
+
+    let state = AppState {
+        record_tx: record_tx.clone(),
+        hit_tx: hit_tx.clone(),
+    };
+
+    // Scanner loop runs on a blocking thread so it doesn't jam the async runtime.
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = run_scan_loop(record_tx, hit_tx) {
+            eprintln!("scanner loop exited with error: {err}");
+        }
+    });
+
+    let app = Router::new()
+        .route("/ws/records", get(ws_records_handler))
+        .route("/ws/hits", get(ws_hits_handler))
+        .with_state(state);
+
+    let addr: SocketAddr = "0.0.0.0:9001".parse()?;
+    let listener = TcpListener::bind(addr).await?;
+
+    println!("Axum server listening on ws://{addr}");
+    println!("  records: ws://{addr}/ws/records");
+    println!("  hits:    ws://{addr}/ws/hits");
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn run_scan_loop(
+    record_tx: broadcast::Sender<RecordMessage>,
+    hit_tx: broadcast::Sender<HitMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let source_id = "fm_sweep".to_string();
     let sample_rate_hz = 2_048_000.0;
     let dwell_ms = 20;
-    let hit_threshold_over_floor = 6.0;
     let fft_min_samples = 4096;
 
     let planner_cfg = SweepPlannerConfig {
@@ -50,10 +141,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (101_100_000.0, 1.5),
     ];
 
-    let mut planner = SweepPlanner::new_priority(planner_cfg, &hotspots);
-
-    println!("Sweep plan (priority order):");
-    for point in planner.points() {
+    println!("Initial sweep plan (priority order):");
+    let initial_planner = SweepPlanner::new_priority(planner_cfg.clone(), &hotspots);
+    for point in initial_planner.points() {
         println!(
             "  center={:.3} MHz, priority={:.2}, window={:.3}..{:.3} MHz",
             point.center_hz / 1e6,
@@ -65,7 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let dev = open_first_rtlsdr()?;
-    let mut stream = RtlStream::open(dev, planner.points()[0].center_hz, sample_rate_hz)?;
+    let mut stream = RtlStream::open(dev, initial_planner.points()[0].center_hz, sample_rate_hz)?;
 
     println!("Configured:");
     println!("  sample rate: {}", stream.current_sample_rate()?);
@@ -73,86 +163,173 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     stream.activate()?;
 
-    let mut records = Vec::<SweepRecord>::new();
-    let mut hits = Vec::<ScanHit>::new();
+    let hit_cfg = HitDetectorConfig::default();
+    let mut completed_dwells = 0usize;
+    let mut detected_hits = 0usize;
+    let mut sweep_round = 0usize;
 
-    while let Some(point) = planner.pop_next() {
-        let samples = dwell_capture(
-            &mut stream,
-            point.center_hz,
-            dwell_ms,
-            SettleStrategy::SleepAndFlush {
-                millis: 5,
-                flush_count: 2,
-                timeout_us: 250_000,
-            },
-        )?;
+    loop {
+        sweep_round += 1;
+        println!("\nStarting sweep round #{sweep_round}");
 
-        if samples.len() < fft_min_samples {
-            continue;
-        }
+        let mut planner = SweepPlanner::new_priority(planner_cfg.clone(), &hotspots);
 
-        let analysis = analyze(&samples[..fft_min_samples], point.center_hz, sample_rate_hz);
-        let timestamp_ms = now_ms();
-        let snr_like_db = power_ratio_db(analysis.peak_power, analysis.noise_floor);
+        while let Some(point) = planner.pop_next() {
+            let samples = dwell_capture(
+                &mut stream,
+                point.center_hz,
+                dwell_ms,
+                SettleStrategy::SleepAndFlush {
+                    millis: 5,
+                    flush_count: 2,
+                    timeout_us: 250_000,
+                },
+            )?;
 
-        let record = SweepRecord {
-            center_hz: point.center_hz,
-            lower_edge_hz: analysis.lower_edge_hz,
-            upper_edge_hz: analysis.upper_edge_hz,
-            avg_power: analysis.avg_power,
-            noise_floor: analysis.noise_floor,
-            peak_power: analysis.peak_power,
-            peak_bin: analysis.peak_bin,
-            estimated_peak_hz: analysis.estimated_peak_hz,
-            timestamp_ms,
-        };
+            if samples.len() < fft_min_samples {
+                continue;
+            }
 
-        println!(
-            "center={:.3} MHz peak={:.3} MHz avg={:.3} floor={:.3} peak={:.3} snr≈{:.2} dB",
-            record.center_hz / 1e6,
-            record.estimated_peak_hz / 1e6,
-            record.avg_power,
-            record.noise_floor,
-            record.peak_power,
-            snr_like_db,
-        );
+            let analysis = analyze(&samples[..fft_min_samples], point.center_hz, sample_rate_hz);
+            let timestamp_ms = now_ms();
 
-        if snr_like_db >= hit_threshold_over_floor {
-            hits.push(ScanHit {
-                dwell_center_hz: point.center_hz,
-                estimated_peak_hz: analysis.estimated_peak_hz,
+            let record = SweepRecord {
+                center_hz: point.center_hz,
+                lower_edge_hz: analysis.lower_edge_hz,
+                upper_edge_hz: analysis.upper_edge_hz,
                 avg_power: analysis.avg_power,
                 noise_floor: analysis.noise_floor,
-                peak_bin: analysis.peak_bin,
                 peak_power: analysis.peak_power,
-                snr_like_db,
+                peak_bin: analysis.peak_bin,
+                estimated_peak_hz: analysis.estimated_peak_hz,
                 timestamp_ms,
-            });
+            };
 
-            planner.reprioritize_near(analysis.estimated_peak_hz, 0.75, 1_500_000.0);
+            let snr_db = eli_edge::scanner::hit_detection::estimate_snr_db(
+                analysis.peak_power,
+                analysis.noise_floor,
+            );
+
+            println!(
+                "center={:.3} MHz peak={:.3} MHz avg={:.3} floor={:.3} peak={:.3} snr≈{:.2} dB",
+                record.center_hz / 1e6,
+                record.estimated_peak_hz / 1e6,
+                record.avg_power,
+                record.noise_floor,
+                record.peak_power,
+                snr_db,
+            );
+
+            let record_msg = RecordMessage {
+                kind: "record",
+                source_id: source_id.clone(),
+                timestamp_ms: record.timestamp_ms,
+                center_hz: record.center_hz,
+                lower_edge_hz: record.lower_edge_hz,
+                upper_edge_hz: record.upper_edge_hz,
+                avg_power: record.avg_power,
+                noise_floor: record.noise_floor,
+                peak_power: record.peak_power,
+                peak_bin: record.peak_bin,
+                estimated_peak_hz: record.estimated_peak_hz,
+            };
+
+            let _ = record_tx.send(record_msg);
+            completed_dwells += 1;
+
+            if let Some(hit) = detect_hit(
+                &hit_cfg,
+                &source_id,
+                timestamp_ms,
+                &analysis,
+                fft_min_samples,
+            ) {
+                detected_hits += 1;
+                log_hit(&hit);
+
+                let hit_msg = HitMessage {
+                    kind: "hit",
+                    source_id: hit.source_id.clone(),
+                    timestamp_ms: hit.timestamp_ms,
+                    center_hz: hit.center_hz,
+                    peak_hz: hit.peak_hz,
+                    lower_edge_hz: hit.lower_edge_hz,
+                    upper_edge_hz: hit.upper_edge_hz,
+                    peak_bin: hit.peak_bin,
+                    peak_power: hit.peak_power,
+                    noise_floor: hit.noise_floor,
+                    avg_power: hit.avg_power,
+                    snr_db: hit.snr_db,
+                };
+
+                let _ = hit_tx.send(hit_msg);
+                planner.reprioritize_near(hit.peak_hz, 0.75, 1_500_000.0);
+            }
         }
 
-        records.push(record);
-    }
-
-    stream.deactivate()?;
-
-    println!("\nCompleted {} dwells", records.len());
-    println!("Detected {} hits", hits.len());
-
-    for hit in &hits {
         println!(
-            "  HIT center={:.3} MHz peak≈{:.3} MHz floor={:.3} peak={:.3} snr≈{:.2} dB",
-            hit.dwell_center_hz / 1e6,
-            hit.estimated_peak_hz / 1e6,
-            hit.noise_floor,
-            hit.peak_power,
-            hit.snr_like_db,
+            "Completed sweep round #{sweep_round} (total dwells: {completed_dwells}, total hits: {detected_hits})"
         );
     }
+}
 
-    Ok(())
+async fn ws_records_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| records_socket(socket, state))
+}
+
+async fn ws_hits_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| hits_socket(socket, state))
+}
+
+async fn records_socket(mut socket: WebSocket, state: AppState) {
+    let mut rx = state.record_tx.subscribe();
+
+    while let Ok(msg) = rx.recv().await {
+        match serde_json::to_string(&msg) {
+            Ok(text) => {
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                eprintln!("failed to serialize record message: {err}");
+            }
+        }
+    }
+}
+
+async fn hits_socket(mut socket: WebSocket, state: AppState) {
+    let mut rx = state.hit_tx.subscribe();
+
+    while let Ok(msg) = rx.recv().await {
+        match serde_json::to_string(&msg) {
+            Ok(text) => {
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                eprintln!("failed to serialize hit message: {err}");
+            }
+        }
+    }
+}
+
+fn log_hit(hit: &Hit) {
+    println!(
+        "  HIT center={:.3} MHz peak≈{:.3} MHz floor={:.3} peak={:.3} snr≈{:.2} dB",
+        hit.center_hz / 1e6,
+        hit.peak_hz / 1e6,
+        hit.noise_floor,
+        hit.peak_power,
+        hit.snr_db,
+    );
 }
 
 fn now_ms() -> u64 {
@@ -160,10 +337,4 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn power_ratio_db(peak: f32, floor: f32) -> f32 {
-    let safe_peak = peak.max(1e-12);
-    let safe_floor = floor.max(1e-12);
-    20.0 * (safe_peak / safe_floor).log10()
 }

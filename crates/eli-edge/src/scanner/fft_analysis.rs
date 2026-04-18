@@ -6,6 +6,7 @@ use crate::helpers::{dc::remove_dc, fft::compute_fft};
 pub struct AnalysisResult {
     pub avg_power: f32,
     pub noise_floor: f32,
+    pub center_hz: f64,
     pub peak_bin: usize,
     pub peak_power: f32,
     pub estimated_peak_hz: f64,
@@ -38,6 +39,7 @@ pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> An
 
     AnalysisResult {
         avg_power,
+        center_hz,
         noise_floor,
         peak_bin,
         peak_power,
