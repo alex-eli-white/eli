@@ -67,14 +67,40 @@ function normalizeBins(bins: number[]): number[] {
         return [];
     }
 
-    const floorDb = -120;
-    const ceilDb = -20;
-
-    return bins.map((value) => {
-        const db = 10 * Math.log10(Math.max(value, 1e-12));
-        const normalized = (db - floorDb) / (ceilDb - floorDb);
-        return clamp01(normalized);
+    // Log-compress the bins, but do not assume backend units are true dB.
+    const compressed = bins.map((value) => {
+        const safe = Number.isFinite(value) ? Math.max(value, 1e-12) : 1e-12;
+        return Math.log10(safe);
     });
+
+    let min = Infinity;
+    let max = -Infinity;
+
+    for (const value of compressed) {
+        if (!Number.isFinite(value)) {
+            continue;
+        }
+
+        if (value < min) {
+            min = value;
+        }
+
+        if (value > max) {
+            max = value;
+        }
+    }
+
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+        return new Array(bins.length).fill(0);
+    }
+
+    const span = max - min;
+
+    if (span < 1e-9) {
+        return new Array(bins.length).fill(0);
+    }
+
+    return compressed.map((value) => clamp01((value - min) / span));
 }
 
 export default function WaterfallCanvas({
