@@ -12,6 +12,7 @@ pub struct AnalysisResult {
     pub estimated_peak_hz: f64,
     pub lower_edge_hz: f64,
     pub upper_edge_hz: f64,
+    pub spectrum: Vec<f32>,
 }
 
 pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> AnalysisResult {
@@ -46,6 +47,7 @@ pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> An
         estimated_peak_hz,
         lower_edge_hz,
         upper_edge_hz,
+        spectrum,
     }
 }
 

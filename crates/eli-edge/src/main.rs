@@ -21,13 +21,14 @@ use eli_edge::scanner::fft_analysis::analyze;
 use eli_edge::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
 use eli_edge::scanner::sweep_planner::{SweepPlanner, SweepPlannerConfig};
 use eli_edge::scanner::vanilla::SweepRecord;
+use eli_edge::scanner::vanilla::WaterfallMessage;
 
 #[derive(Clone)]
 struct AppState {
     record_tx: broadcast::Sender<RecordMessage>,
     hit_tx: broadcast::Sender<HitMessage>,
+    waterfall_tx: broadcast::Sender<WaterfallMessage>,
 }
-
 #[derive(Debug, Clone, Serialize)]
 struct RecordMessage {
     #[serde(rename = "type")]
@@ -88,15 +89,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (record_tx, _) = broadcast::channel::<RecordMessage>(256);
     let (hit_tx, _) = broadcast::channel::<HitMessage>(256);
+    let (waterfall_tx, _) = broadcast::channel::<WaterfallMessage>(64);
 
     let state = AppState {
         record_tx: record_tx.clone(),
         hit_tx: hit_tx.clone(),
+        waterfall_tx: waterfall_tx.clone(),
     };
 
-    // Scanner loop runs on a blocking thread so it doesn't jam the async runtime.
     tokio::task::spawn_blocking(move || {
-        if let Err(err) = run_scan_loop(record_tx, hit_tx) {
+        if let Err(err) = run_scan_loop(record_tx, hit_tx, waterfall_tx) {
             eprintln!("scanner loop exited with error: {err}");
         }
     });
@@ -104,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/ws/records", get(ws_records_handler))
         .route("/ws/hits", get(ws_hits_handler))
+        .route("/ws/waterfall", get(ws_waterfall_handler))
         .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:9001".parse()?;
@@ -121,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_scan_loop(
     record_tx: broadcast::Sender<RecordMessage>,
     hit_tx: broadcast::Sender<HitMessage>,
+    waterfall_tx: broadcast::Sender<WaterfallMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source_id = "fm_sweep".to_string();
     let sample_rate_hz = 2_048_000.0;
@@ -235,7 +239,20 @@ fn run_scan_loop(
             };
 
             let _ = record_tx.send(record_msg);
+
+            let waterfall_msg = WaterfallMessage {
+                kind: "waterfall_frame",
+                source_id: source_id.clone(),
+                timestamp_ms,
+                center_hz: analysis.center_hz,
+                lower_edge_hz: analysis.lower_edge_hz,
+                upper_edge_hz: analysis.upper_edge_hz,
+                bins: analysis.spectrum.clone(),
+            };
+
             completed_dwells += 1;
+
+            let _ = waterfall_tx.send(waterfall_msg);
 
             if let Some(hit) = detect_hit(
                 &hit_cfg,
@@ -271,6 +288,18 @@ fn run_scan_loop(
             "Completed sweep round #{sweep_round} (total dwells: {completed_dwells}, total hits: {detected_hits})"
         );
     }
+}
+
+async fn ws_waterfall_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_waterfall_socket(socket, state))
+}
+
+async fn handle_waterfall_socket(socket: WebSocket, state: AppState) {
+    let mut rx = state.waterfall_tx.subscribe();
+    forward_broadcast_to_ws(socket, &mut rx).await;
 }
 
 async fn ws_records_handler(
@@ -337,4 +366,34 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+async fn forward_broadcast_to_ws<T>(
+    mut socket: WebSocket,
+    rx: &mut broadcast::Receiver<T>,
+) where
+    T: Serialize + Clone,
+{
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                match serde_json::to_string(&msg) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("failed to serialize websocket message: {err}");
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                eprintln!("websocket client lagged, skipped {skipped} messages");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                break;
+            }
+        }
+    }
 }

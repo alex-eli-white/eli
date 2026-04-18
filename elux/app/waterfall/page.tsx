@@ -32,6 +32,16 @@ type HitMessage = {
     snr_db: number;
 };
 
+type WaterfallMessage = {
+    type: "waterfall_frame";
+    source_id: string;
+    timestamp_ms: number;
+    center_hz: number;
+    lower_edge_hz: number;
+    upper_edge_hz: number;
+    bins: number[];
+};
+
 function formatHz(hz: number): string {
     if (hz >= 1_000_000) {
         return `${(hz / 1_000_000).toFixed(3)} MHz`;
@@ -51,9 +61,14 @@ export default function WaterfallPage() {
     const [hitSocketState, setHitSocketState] = useState<
         "connecting" | "open" | "closed"
     >("connecting");
+    const [waterfallSocketState, setWaterfallSocketState] = useState<
+        "connecting" | "open" | "closed"
+    >("connecting");
 
     const [latestRecord, setLatestRecord] = useState<RecordMessage | null>(null);
     const [recentHits, setRecentHits] = useState<HitMessage[]>([]);
+    const [latestWaterfallFrame, setLatestWaterfallFrame] =
+        useState<WaterfallMessage | null>(null);
 
     useEffect(() => {
         const wsBase = `ws://${window.location.hostname}:9001`;
@@ -62,6 +77,7 @@ export default function WaterfallPage() {
 
         const recordWs = new WebSocket(`${wsBase}/ws/records`);
         const hitWs = new WebSocket(`${wsBase}/ws/hits`);
+        const waterfallWs = new WebSocket(`${wsBase}/ws/waterfall`);
 
         recordWs.onopen = () => {
             console.log("records websocket open");
@@ -73,7 +89,7 @@ export default function WaterfallPage() {
             setRecordSocketState("closed");
         };
 
-        recordWs.onerror = (event) => {
+        recordWs.onerror = () => {
             setRecordSocketState("closed");
         };
 
@@ -103,7 +119,7 @@ export default function WaterfallPage() {
             setHitSocketState("closed");
         };
 
-        hitWs.onerror = (event) => {
+        hitWs.onerror = () => {
             setHitSocketState("closed");
         };
 
@@ -123,9 +139,40 @@ export default function WaterfallPage() {
             }
         };
 
+        waterfallWs.onopen = () => {
+            console.log("waterfall websocket open");
+            setWaterfallSocketState("open");
+        };
+
+        waterfallWs.onclose = (event) => {
+            console.log("waterfall websocket closed", event.code, event.reason);
+            setWaterfallSocketState("closed");
+        };
+
+        waterfallWs.onerror = () => {
+            setWaterfallSocketState("closed");
+        };
+
+        waterfallWs.onmessage = (event) => {
+            console.log("waterfall raw message", event.data);
+
+            try {
+                const msg = JSON.parse(event.data) as WaterfallMessage;
+
+                if (msg.type !== "waterfall_frame") {
+                    return;
+                }
+
+                setLatestWaterfallFrame(msg);
+            } catch (error) {
+                console.error("Failed to parse waterfall message", error);
+            }
+        };
+
         return () => {
             recordWs.close();
             hitWs.close();
+            waterfallWs.close();
         };
     }, []);
 
@@ -138,16 +185,24 @@ export default function WaterfallPage() {
     }, [recentHits]);
 
     const overallConnectionState = useMemo(() => {
-        if (recordSocketState === "open" || hitSocketState === "open") {
+        if (
+            recordSocketState === "open" ||
+            hitSocketState === "open" ||
+            waterfallSocketState === "open"
+        ) {
             return "open";
         }
 
-        if (recordSocketState === "connecting" || hitSocketState === "connecting") {
+        if (
+            recordSocketState === "connecting" ||
+            hitSocketState === "connecting" ||
+            waterfallSocketState === "connecting"
+        ) {
             return "connecting";
         }
 
         return "closed";
-    }, [recordSocketState, hitSocketState]);
+    }, [recordSocketState, hitSocketState, waterfallSocketState]);
 
     return (
         <main className="min-h-screen bg-neutral-950 text-neutral-100">
@@ -174,8 +229,8 @@ export default function WaterfallPage() {
                                             : "text-red-400"
                                 }
                             >
-                {overallConnectionState}
-              </span>
+                                {overallConnectionState}
+                            </span>
                         </div>
                     </div>
 
@@ -228,7 +283,9 @@ export default function WaterfallPage() {
                             <div>
                                 <h2 className="text-lg font-semibold">Waterfall</h2>
                                 <p className="text-sm text-neutral-400">
-                                    Waiting for real FFT bin stream from backend.
+                                    {latestWaterfallFrame
+                                        ? `Live FFT bins: ${latestWaterfallFrame.bins.length}`
+                                        : "Waiting for real FFT bin stream from backend."}
                                 </p>
                             </div>
 
@@ -239,7 +296,7 @@ export default function WaterfallPage() {
                             </div>
                         </div>
 
-                        <WaterfallCanvas bins={syntheticBins} />
+                        <WaterfallCanvas bins={latestWaterfallFrame?.bins ?? []} />
                     </div>
 
                     <aside className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4 shadow-sm">

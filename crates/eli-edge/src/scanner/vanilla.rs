@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 #[derive(Debug, Clone)]
 pub struct ScanHit {
     pub dwell_center_hz: f64,
@@ -21,4 +23,17 @@ pub struct SweepRecord {
     pub peak_bin: usize,
     pub estimated_peak_hz: f64,
     pub timestamp_ms: u64,
+}
+
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaterfallMessage {
+    #[serde(rename = "type")]
+pub kind: &'static str,
+pub source_id: String,
+pub timestamp_ms: u64,
+pub center_hz: f64,
+pub lower_edge_hz: f64,
+pub upper_edge_hz: f64,
+pub bins: Vec<f32>,
 }

@@ -67,20 +67,14 @@ function normalizeBins(bins: number[]): number[] {
         return [];
     }
 
-    // Log compression helps a lot for spectral data.
-    const logged = bins.map((value) => Math.log10(Math.max(value, 1e-9)));
+    const floorDb = -120;
+    const ceilDb = -20;
 
-    let min = Infinity;
-    let max = -Infinity;
-
-    for (const value of logged) {
-        if (value < min) min = value;
-        if (value > max) max = value;
-    }
-
-    const span = Math.max(max - min, 1e-9);
-
-    return logged.map((value) => (value - min) / span);
+    return bins.map((value) => {
+        const db = 10 * Math.log10(Math.max(value, 1e-12));
+        const normalized = (db - floorDb) / (ceilDb - floorDb);
+        return clamp01(normalized);
+    });
 }
 
 export default function WaterfallCanvas({
@@ -91,6 +85,21 @@ export default function WaterfallCanvas({
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
     const normalizedBins = useMemo(() => normalizeBins(bins), [bins]);
+
+    useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) {
+            return;
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            return;
+        }
+
+        ctx.fillStyle = "black";
+        ctx.fillRect(0, 0, width, height);
+    }, [width, height]);
 
     useEffect(() => {
         if (normalizedBins.length === 0) {
