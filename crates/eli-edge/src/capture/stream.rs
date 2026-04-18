@@ -7,6 +7,12 @@ pub struct IqSample {
     pub q: f32,
 }
 
+impl IqSample {
+    pub fn to_complex(&self) -> Complex32 {
+        Complex32::new(self.i, self.q)
+    }
+}
+
 pub struct RtlStream {
     device: Device,
     stream: soapysdr::RxStream<Complex32>,
@@ -54,22 +60,34 @@ impl RtlStream {
         timeout_us: i64,
     ) -> Result<Vec<IqSample>, Box<dyn std::error::Error>> {
         let mut buffers = [&mut self.scratch[..]];
-        let result = self.stream.read(&mut buffers, timeout_us)?;
+        let count = self.stream.read(&mut buffers, timeout_us)?;
 
-        let iq_pairs = result / 2;
+        let mut out = Vec::with_capacity(count);
 
-        let mut out = Vec::with_capacity(iq_pairs);
-
-        for idx in 0..iq_pairs {
-            let i_raw = self.scratch[idx * 2];
-            let q_raw = self.scratch[idx * 2 + 1];
-
-            let i = (i_raw.re as f32 - 127.5) / 128.0;
-            let q = (q_raw.im as f32 - 127.5) / 128.0;
-
-            out.push(IqSample { i, q });
+        for sample in &self.scratch[..count] {
+            out.push(IqSample {
+                i: sample.re,
+                q: sample.im,
+            });
         }
 
         Ok(out)
+    }
+
+    pub fn discard_buffers(
+        &mut self,
+        count: usize,
+        timeout_us: i64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for _ in 0..count {
+            let _ = self.read_samples(timeout_us)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn set_frequency(&mut self, freq: f64) -> Result<(), Box<dyn std::error::Error>> {
+        self.device.set_frequency(Direction::Rx, 0, freq, ())?;
+        Ok(())
     }
 }
