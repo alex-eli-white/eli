@@ -8,9 +8,14 @@ pub fn compute_fft(samples: &[Complex32]) -> Vec<f32> {
     let mut buffer = samples.to_vec();
     fft.process(&mut buffer);
 
-    // magnitude spectrum
+    let scale = 1.0 / samples.len() as f32;
+
     buffer
         .iter()
-        .map(|c| (c.re * c.re + c.im * c.im).sqrt())
+        .map(|c| {
+            let re = c.re * scale;
+            let im = c.im * scale;
+            re * re + im * im
+        })
         .collect()
 }

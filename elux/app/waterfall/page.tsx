@@ -154,14 +154,23 @@ export default function WaterfallPage() {
         };
 
         waterfallWs.onmessage = (event) => {
-            console.log("waterfall raw message", event.data);
-
             try {
                 const msg = JSON.parse(event.data) as WaterfallMessage;
 
                 if (msg.type !== "waterfall_frame") {
                     return;
                 }
+
+                const dbVals = msg.bins.map((v) => 10 * Math.log10(Math.max(v, 1e-12)));
+                const minDb = Math.min(...dbVals);
+                const maxDb = Math.max(...dbVals);
+
+                console.log("waterfall frame stats", {
+                    bins: msg.bins.length,
+                    minDb,
+                    maxDb,
+                    first10db: dbVals.slice(0, 10),
+                });
 
                 setLatestWaterfallFrame(msg);
             } catch (error) {

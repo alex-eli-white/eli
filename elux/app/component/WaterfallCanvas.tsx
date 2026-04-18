@@ -16,14 +16,6 @@ function lerp(a: number, b: number, t: number): number {
     return a + (b - a) * t;
 }
 
-/**
- * Very simple gradient:
- * 0.00 -> black
- * 0.20 -> dark blue
- * 0.45 -> cyan/green
- * 0.70 -> yellow/orange
- * 1.00 -> white
- */
 function colorMap(t: number): [number, number, number] {
     const x = clamp01(t);
 
@@ -62,45 +54,42 @@ function colorMap(t: number): [number, number, number] {
     ];
 }
 
+function percentile(sorted: number[], q: number): number {
+    if (sorted.length === 0) {
+        return 0;
+    }
+
+    const idx = Math.min(
+        sorted.length - 1,
+        Math.max(0, Math.floor(q * (sorted.length - 1)))
+    );
+
+    return sorted[idx];
+}
+
 function normalizeBins(bins: number[]): number[] {
     if (bins.length === 0) {
         return [];
     }
 
-    // Log-compress the bins, but do not assume backend units are true dB.
-    const compressed = bins.map((value) => {
-        const safe = Number.isFinite(value) ? Math.max(value, 1e-12) : 1e-12;
-        return Math.log10(safe);
+    const dbVals = bins.map((value) =>
+        10 * Math.log10(Math.max(value, 1e-12))
+    );
+
+    const sorted = [...dbVals].sort((a, b) => a - b);
+
+    // Robust display window:
+    // low percentile ≈ background
+    // high percentile ≈ strong signal
+    const lowDb = percentile(sorted, 0.10);
+    const highDb = percentile(sorted, 0.995);
+
+    const span = Math.max(highDb - lowDb, 1e-6);
+
+    return dbVals.map((db) => {
+        const normalized = (db - lowDb) / span;
+        return Math.pow(clamp01(normalized), 1.4);
     });
-
-    let min = Infinity;
-    let max = -Infinity;
-
-    for (const value of compressed) {
-        if (!Number.isFinite(value)) {
-            continue;
-        }
-
-        if (value < min) {
-            min = value;
-        }
-
-        if (value > max) {
-            max = value;
-        }
-    }
-
-    if (!Number.isFinite(min) || !Number.isFinite(max)) {
-        return new Array(bins.length).fill(0);
-    }
-
-    const span = max - min;
-
-    if (span < 1e-9) {
-        return new Array(bins.length).fill(0);
-    }
-
-    return compressed.map((value) => clamp01((value - min) / span));
 }
 
 export default function WaterfallCanvas({
@@ -142,10 +131,8 @@ export default function WaterfallCanvas({
             return;
         }
 
-        // Shift existing image down by 1 pixel row.
         ctx.drawImage(canvas, 0, 0, width, height - 1, 0, 1, width, height - 1);
 
-        // Draw newest row at the top.
         const row = ctx.createImageData(width, 1);
 
         for (let x = 0; x < width; x += 1) {
