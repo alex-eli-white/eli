@@ -11,7 +11,7 @@ impl Default for HitDetectorConfig {
     fn default() -> Self {
         Self {
             min_snr_db: 12.0,
-            min_peak_power: 1.0,
+            min_peak_power: 0.0001,
             edge_exclusion_bins: 8,
         }
     }

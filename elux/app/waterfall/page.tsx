@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WaterfallCanvas from "../component/WaterfallCanvas";
 
 type RecordMessage = {
@@ -42,154 +42,197 @@ type WaterfallMessage = {
     bins: number[];
 };
 
+type ScannerStatus = {
+    is_running: boolean;
+};
+
 function formatHz(hz: number): string {
-    if (hz >= 1_000_000) {
-        return `${(hz / 1_000_000).toFixed(3)} MHz`;
-    }
-
-    if (hz >= 1_000) {
-        return `${(hz / 1_000).toFixed(3)} kHz`;
-    }
-
+    if (hz >= 1_000_000) return `${(hz / 1_000_000).toFixed(3)} MHz`;
+    if (hz >= 1_000) return `${(hz / 1_000).toFixed(3)} kHz`;
     return `${hz.toFixed(0)} Hz`;
 }
 
 export default function WaterfallPage() {
-    const [recordSocketState, setRecordSocketState] = useState<
-        "connecting" | "open" | "closed"
-    >("connecting");
-    const [hitSocketState, setHitSocketState] = useState<
-        "connecting" | "open" | "closed"
-    >("connecting");
-    const [waterfallSocketState, setWaterfallSocketState] = useState<
-        "connecting" | "open" | "closed"
-    >("connecting");
+    const [recordSocketState, setRecordSocketState] = useState<"connecting" | "open" | "closed">("connecting");
+    const [hitSocketState, setHitSocketState] = useState<"connecting" | "open" | "closed">("connecting");
+    const [waterfallSocketState, setWaterfallSocketState] = useState<"connecting" | "open" | "closed">("connecting");
 
     const [latestRecord, setLatestRecord] = useState<RecordMessage | null>(null);
     const [recentHits, setRecentHits] = useState<HitMessage[]>([]);
-    const [latestWaterfallFrame, setLatestWaterfallFrame] =
-        useState<WaterfallMessage | null>(null);
+    const [latestWaterfallFrame, setLatestWaterfallFrame] = useState<WaterfallMessage | null>(null);
+
+    const [scannerRunning, setScannerRunning] = useState(true);
+    const [scannerBusy, setScannerBusy] = useState(false);
+
+    const reconnectTimers = useRef<number[]>([]);
+
+    const clearReconnectTimers = () => {
+        reconnectTimers.current.forEach((id) => window.clearTimeout(id));
+        reconnectTimers.current = [];
+    };
+    const setScannerState = useCallback(async (running: boolean) => {
+        setScannerBusy(true);
+
+        try {
+            const endpoint = running ? "start" : "stop";
+            const res = await fetch(`http://${window.location.hostname}:9001/api/scanner/${endpoint}`, {
+                method: "POST",
+            });
+
+            const data = (await res.json()) as ScannerStatus;
+            setScannerRunning(data.is_running);
+        } catch (err) {
+            console.error("failed to update scanner state", err);
+        } finally {
+            setScannerBusy(false);
+        }
+    }, []);
 
     useEffect(() => {
-        const wsBase = `ws://${window.location.hostname}:9001`;
+        const host = window.location.hostname;
+        const wsBase = `ws://${host}:9001`;
+        console.log("hostname", window.location.hostname);
+        console.log("wsBase", wsBase);
+        let cancelled = false;
 
-        console.log("Connecting to websocket base:", wsBase);
+        const connectRecordSocket = () => {
+            setRecordSocketState("connecting");
+            const ws = new WebSocket(`${wsBase}/ws/records`);
 
-        const recordWs = new WebSocket(`${wsBase}/ws/records`);
-        const hitWs = new WebSocket(`${wsBase}/ws/hits`);
-        const waterfallWs = new WebSocket(`${wsBase}/ws/waterfall`);
+            ws.onopen = () => setRecordSocketState("open");
+            ws.onerror = () => setRecordSocketState("closed");
+            ws.onclose = () => {
+                setRecordSocketState("closed");
+                const timer = window.setTimeout(connectRecordSocket, 1000);
+                reconnectTimers.current.push(timer);
+            };
 
-        recordWs.onopen = () => {
-            console.log("records websocket open");
-            setRecordSocketState("open");
-        };
-
-        recordWs.onclose = (event) => {
-            console.log("records websocket closed", event.code, event.reason);
-            setRecordSocketState("closed");
-        };
-
-        recordWs.onerror = () => {
-            setRecordSocketState("closed");
-        };
-
-        recordWs.onmessage = (event) => {
-            console.log("record raw message", event.data);
-
-            try {
-                const msg = JSON.parse(event.data) as RecordMessage;
-
-                if (msg.type !== "record") {
-                    return;
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data) as RecordMessage;
+                    if (msg.type === "record") {
+                        setLatestRecord(msg);
+                    }
+                } catch (error) {
+                    console.error("Failed to parse record message", error);
                 }
+            };
 
-                setLatestRecord(msg);
-            } catch (error) {
-                console.error("Failed to parse record message", error);
-            }
+            return ws;
         };
 
-        hitWs.onopen = () => {
-            console.log("hits websocket open");
-            setHitSocketState("open");
-        };
+        const connectHitSocket = () => {
+            setHitSocketState("connecting");
+            const ws = new WebSocket(`${wsBase}/ws/hits`);
 
-        hitWs.onclose = (event) => {
-            console.log("hits websocket closed", event.code, event.reason);
-            setHitSocketState("closed");
-        };
+            ws.onopen = () => setHitSocketState("open");
+            ws.onerror = () => setHitSocketState("closed");
+            ws.onclose = () => {
+                setHitSocketState("closed");
+                const timer = window.setTimeout(connectHitSocket, 1000);
+                reconnectTimers.current.push(timer);
+            };
 
-        hitWs.onerror = () => {
-            setHitSocketState("closed");
-        };
-
-        hitWs.onmessage = (event) => {
-            console.log("hit raw message", event.data);
-
-            try {
-                const msg = JSON.parse(event.data) as HitMessage;
-
-                if (msg.type !== "hit") {
-                    return;
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data) as HitMessage;
+                    if (msg.type === "hit") {
+                        setRecentHits((prev) => [msg, ...prev].slice(0, 20));
+                    }
+                } catch (error) {
+                    console.error("Failed to parse hit message", error);
                 }
+            };
 
-                setRecentHits((prev) => [msg, ...prev].slice(0, 20));
-            } catch (error) {
-                console.error("Failed to parse hit message", error);
-            }
+            return ws;
         };
 
-        waterfallWs.onopen = () => {
-            console.log("waterfall websocket open");
-            setWaterfallSocketState("open");
-        };
+        const connectWaterfallSocket = () => {
+            setWaterfallSocketState("connecting");
+            const ws = new WebSocket(`${wsBase}/ws/waterfall`);
 
-        waterfallWs.onclose = (event) => {
-            console.log("waterfall websocket closed", event.code, event.reason);
-            setWaterfallSocketState("closed");
-        };
+            ws.onopen = () => setWaterfallSocketState("open");
+            ws.onerror = () => setWaterfallSocketState("closed");
+            ws.onclose = () => {
+                setWaterfallSocketState("closed");
+                const timer = window.setTimeout(connectWaterfallSocket, 1000);
+                reconnectTimers.current.push(timer);
+            };
 
-        waterfallWs.onerror = () => {
-            setWaterfallSocketState("closed");
-        };
+            // ws.onmessage = (event) => {
+            //     try {
+            //         const msg = JSON.parse(event.data) as WaterfallMessage;
+            //         if (msg.type === "waterfall_frame") {
+            //             setLatestWaterfallFrame(msg);
+            //         }
+            //     } catch (error) {
+            //         console.error("Failed to parse waterfall message", error);
+            //     }
+            // };
 
-        waterfallWs.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data) as WaterfallMessage;
+            // ws.onmessage = (event) => {
+            //     console.log("RAW WATERFALL MESSAGE", event.data);
+            //
+            //     try {
+            //         const msg = JSON.parse(event.data);
+            //         console.log("PARSED WATERFALL", msg);
+            //
+            //         if (msg.type === "waterfall_frame") {
+            //             setLatestWaterfallFrame(msg);
+            //         }
+            //     } catch (e) {
+            //         console.error("parse fail", e);
+            //     }
+            // };
 
-                if (msg.type !== "waterfall_frame") {
-                    return;
+            ws.onmessage = (event) => {
+                console.log("RAW:", event.data);
+
+                try {
+                    const parsed = JSON.parse(event.data);
+                    console.log("PARSED:", parsed);
+
+                    console.log("KEYS:", Object.keys(parsed));
+
+                    console.log("bins exists?", parsed.bins);
+                    console.log("bins length?", parsed.bins?.length);
+
+                    setLatestWaterfallFrame(parsed);
+                } catch (err) {
+                    console.error("parse error", err);
                 }
+            };
 
-                const dbVals = msg.bins.map((v) => 10 * Math.log10(Math.max(v, 1e-12)));
-                const minDb = Math.min(...dbVals);
-                const maxDb = Math.max(...dbVals);
-
-                console.log("waterfall frame stats", {
-                    bins: msg.bins.length,
-                    minDb,
-                    maxDb,
-                    first10db: dbVals.slice(0, 10),
-                });
-
-                setLatestWaterfallFrame(msg);
-            } catch (error) {
-                console.error("Failed to parse waterfall message", error);
-            }
+            return ws;
         };
+
+        const recordWs = connectRecordSocket();
+        const hitWs = connectHitSocket();
+        const waterfallWs = connectWaterfallSocket();
+
+        (async () => {
+            try {
+                const res = await fetch(`http://${host}:9001/api/scanner/status`);
+                const data = (await res.json()) as ScannerStatus;
+
+                if (!cancelled) {
+                    setScannerRunning(data.is_running);
+                }
+            } catch (err) {
+                console.error("failed to fetch scanner status", err);
+            }
+        })();
 
         return () => {
+            cancelled = true;
+            clearReconnectTimers();
             recordWs.close();
             hitWs.close();
             waterfallWs.close();
         };
     }, []);
-
     const strongestHit = useMemo(() => {
-        if (recentHits.length === 0) {
-            return null;
-        }
-
+        if (recentHits.length === 0) return null;
         return [...recentHits].sort((a, b) => b.snr_db - a.snr_db)[0];
     }, [recentHits]);
 
@@ -227,45 +270,56 @@ export default function WaterfallPage() {
                             </p>
                         </div>
 
-                        <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm">
-                            <span className="text-neutral-400">Connection: </span>
-                            <span
-                                className={
-                                    overallConnectionState === "open"
-                                        ? "text-green-400"
-                                        : overallConnectionState === "connecting"
-                                            ? "text-yellow-400"
-                                            : "text-red-400"
-                                }
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => setScannerState(!scannerRunning)}
+                                disabled={scannerBusy}
+                                className="rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-medium hover:bg-neutral-800 disabled:opacity-50"
                             >
-                                {overallConnectionState}
-                            </span>
+                                {scannerBusy ? "Working..." : scannerRunning ? "Stop Scanner" : "Start Scanner"}
+                            </button>
+
+                            <div className="rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm">
+                                <span className="text-neutral-400">Connection: </span>
+                                <span
+                                    className={
+                                        overallConnectionState === "open"
+                                            ? "text-green-400"
+                                            : overallConnectionState === "connecting"
+                                                ? "text-yellow-400"
+                                                : "text-red-400"
+                                    }
+                                >
+                                    {overallConnectionState}
+                                </span>
+                            </div>
                         </div>
                     </div>
 
-                    <div className="mt-5 grid gap-3 md:grid-cols-4">
+                    <div className="mt-5 grid gap-3 md:grid-cols-5">
                         <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
-                            <div className="text-xs uppercase tracking-wide text-neutral-500">
-                                Source
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Scanner</div>
+                            <div className="mt-1 text-sm font-medium">
+                                {scannerRunning ? "Running" : "Stopped"}
                             </div>
+                        </div>
+
+                        <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Source</div>
                             <div className="mt-1 text-sm font-medium">
                                 {latestRecord?.source_id ?? "No source yet"}
                             </div>
                         </div>
 
                         <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
-                            <div className="text-xs uppercase tracking-wide text-neutral-500">
-                                Center
-                            </div>
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Center</div>
                             <div className="mt-1 text-sm font-medium">
                                 {latestRecord ? formatHz(latestRecord.center_hz) : "—"}
                             </div>
                         </div>
 
                         <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
-                            <div className="text-xs uppercase tracking-wide text-neutral-500">
-                                Window
-                            </div>
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Window</div>
                             <div className="mt-1 text-sm font-medium">
                                 {latestRecord
                                     ? `${formatHz(latestRecord.lower_edge_hz)} → ${formatHz(latestRecord.upper_edge_hz)}`
@@ -274,9 +328,7 @@ export default function WaterfallPage() {
                         </div>
 
                         <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
-                            <div className="text-xs uppercase tracking-wide text-neutral-500">
-                                Strongest Hit
-                            </div>
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Strongest Hit</div>
                             <div className="mt-1 text-sm font-medium">
                                 {strongestHit
                                     ? `${formatHz(strongestHit.peak_hz)} @ ${strongestHit.snr_db.toFixed(1)} dB`
@@ -304,7 +356,9 @@ export default function WaterfallPage() {
                                     : "No record"}
                             </div>
                         </div>
-
+                        <div className="mb-2 rounded bg-blue-900 px-3 py-2 text-sm text-white">
+                            frame bins: {latestWaterfallFrame?.bins?.length ?? 0}
+                        </div>
                         <WaterfallCanvas bins={latestWaterfallFrame?.bins ?? []} />
                     </div>
 
@@ -343,22 +397,10 @@ export default function WaterfallPage() {
                                         </div>
 
                                         <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-neutral-400">
-                                            <div>
-                                                <span className="text-neutral-500">Peak:</span>{" "}
-                                                {hit.peak_power.toFixed(3)}
-                                            </div>
-                                            <div>
-                                                <span className="text-neutral-500">Floor:</span>{" "}
-                                                {hit.noise_floor.toFixed(3)}
-                                            </div>
-                                            <div>
-                                                <span className="text-neutral-500">Avg:</span>{" "}
-                                                {hit.avg_power.toFixed(3)}
-                                            </div>
-                                            <div>
-                                                <span className="text-neutral-500">Bin:</span>{" "}
-                                                {hit.peak_bin}
-                                            </div>
+                                            <div><span className="text-neutral-500">Peak:</span> {hit.peak_power.toFixed(3)}</div>
+                                            <div><span className="text-neutral-500">Floor:</span> {hit.noise_floor.toFixed(3)}</div>
+                                            <div><span className="text-neutral-500">Avg:</span> {hit.avg_power.toFixed(3)}</div>
+                                            <div><span className="text-neutral-500">Bin:</span> {hit.peak_bin}</div>
                                         </div>
                                     </div>
                                 ))

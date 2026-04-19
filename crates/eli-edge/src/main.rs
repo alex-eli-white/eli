@@ -1,18 +1,26 @@
 use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::Response,
-    routing::get,
-    Router,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
 };
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+
+use tower_http::cors::{Any, CorsLayer};
+use axum::http::{Method, HeaderValue};
 
 use eli_edge::capture::discovery::{discover_rtlsdr_devices, open_first_rtlsdr};
 use eli_edge::capture::stream::RtlStream;
@@ -21,14 +29,15 @@ use eli_edge::scanner::fft_analysis::analyze;
 use eli_edge::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
 use eli_edge::scanner::sweep_planner::{SweepPlanner, SweepPlannerConfig};
 use eli_edge::scanner::vanilla::SweepRecord;
-use eli_edge::scanner::vanilla::WaterfallMessage;
 
 #[derive(Clone)]
 struct AppState {
     record_tx: broadcast::Sender<RecordMessage>,
     hit_tx: broadcast::Sender<HitMessage>,
     waterfall_tx: broadcast::Sender<WaterfallMessage>,
+    scanner_running: Arc<AtomicBool>,
 }
+
 #[derive(Debug, Clone, Serialize)]
 struct RecordMessage {
     #[serde(rename = "type")]
@@ -62,6 +71,23 @@ struct HitMessage {
     snr_db: f32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WaterfallMessage {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    source_id: String,
+    timestamp_ms: u64,
+    center_hz: f64,
+    lower_edge_hz: f64,
+    upper_edge_hz: f64,
+    bins: Vec<f32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScannerStatus {
+    is_running: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let devices = discover_rtlsdr_devices()?;
@@ -91,33 +117,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (hit_tx, _) = broadcast::channel::<HitMessage>(256);
     let (waterfall_tx, _) = broadcast::channel::<WaterfallMessage>(64);
 
+    let scanner_running = Arc::new(AtomicBool::new(true));
+
     let state = AppState {
         record_tx: record_tx.clone(),
         hit_tx: hit_tx.clone(),
         waterfall_tx: waterfall_tx.clone(),
+        scanner_running: scanner_running.clone(),
     };
 
-    tokio::task::spawn_blocking(move || {
-        if let Err(err) = run_scan_loop(record_tx, hit_tx, waterfall_tx) {
-            eprintln!("scanner loop exited with error: {err}");
-        }
-    });
+    println!("about to build app");
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/ws/records", get(ws_records_handler))
         .route("/ws/hits", get(ws_hits_handler))
         .route("/ws/waterfall", get(ws_waterfall_handler))
+        .route("/api/scanner/status", get(scanner_status_handler))
+        .route("/api/scanner/start", post(scanner_start_handler))
+        .route("/api/scanner/stop", post(scanner_stop_handler))
+        .route("/healthz", get(|| async { "ok" }))
+        .layer(cors)
         .with_state(state);
 
-    let addr: SocketAddr = "0.0.0.0:9001".parse()?;
+    let addr: SocketAddr = "127.0.0.1:9001".parse()?;
+
+    println!("about to bind listener on {addr}");
     let listener = TcpListener::bind(addr).await?;
+    println!("listener bound successfully");
 
-    println!("Axum server listening on ws://{addr}");
-    println!("  records: ws://{addr}/ws/records");
-    println!("  hits:    ws://{addr}/ws/hits");
+    println!("about to spawn scanner thread");
+    tokio::task::spawn_blocking(move || {
+        println!("scanner thread entered");
+        if let Err(err) = run_scan_loop(record_tx, hit_tx, waterfall_tx, scanner_running) {
+            eprintln!("scanner loop exited with error: {err}");
+        }
+        println!("scanner thread exited");
+    });
 
+    println!("about to serve axum");
     axum::serve(listener, app).await?;
-
+    println!("axum serve returned unexpectedly");
     Ok(())
 }
 
@@ -125,6 +169,7 @@ fn run_scan_loop(
     record_tx: broadcast::Sender<RecordMessage>,
     hit_tx: broadcast::Sender<HitMessage>,
     waterfall_tx: broadcast::Sender<WaterfallMessage>,
+    scanner_running: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source_id = "fm_sweep".to_string();
     let sample_rate_hz = 2_048_000.0;
@@ -145,40 +190,29 @@ fn run_scan_loop(
         (101_100_000.0, 1.5),
     ];
 
-    println!("Initial sweep plan (priority order):");
-    let initial_planner = SweepPlanner::new_priority(planner_cfg.clone(), &hotspots);
-    for point in initial_planner.points() {
-        println!(
-            "  center={:.3} MHz, priority={:.2}, window={:.3}..{:.3} MHz",
-            point.center_hz / 1e6,
-            point.priority,
-            point.lower_edge_hz / 1e6,
-            point.upper_edge_hz / 1e6
-        );
-    }
-    println!();
-
     let dev = open_first_rtlsdr()?;
+    let initial_planner = SweepPlanner::new_priority(planner_cfg.clone(), &hotspots);
     let mut stream = RtlStream::open(dev, initial_planner.points()[0].center_hz, sample_rate_hz)?;
-
-    println!("Configured:");
-    println!("  sample rate: {}", stream.current_sample_rate()?);
-    println!("  initial frequency: {}", stream.current_frequency()?);
 
     stream.activate()?;
 
     let hit_cfg = HitDetectorConfig::default();
-    let mut completed_dwells = 0usize;
-    let mut detected_hits = 0usize;
-    let mut sweep_round = 0usize;
 
     loop {
-        sweep_round += 1;
-        println!("\nStarting sweep round #{sweep_round}");
+        if !scanner_running.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
 
         let mut planner = SweepPlanner::new_priority(planner_cfg.clone(), &hotspots);
 
         while let Some(point) = planner.pop_next() {
+            if !scanner_running.load(Ordering::Relaxed) {
+                break;
+            }
+
+
+
             let samples = dwell_capture(
                 &mut stream,
                 point.center_hz,
@@ -195,6 +229,7 @@ fn run_scan_loop(
             }
 
             let analysis = analyze(&samples[..fft_min_samples], point.center_hz, sample_rate_hz);
+
             let timestamp_ms = now_ms();
 
             let record = SweepRecord {
@@ -208,21 +243,6 @@ fn run_scan_loop(
                 estimated_peak_hz: analysis.estimated_peak_hz,
                 timestamp_ms,
             };
-
-            let snr_db = eli_edge::scanner::hit_detection::estimate_snr_db(
-                analysis.peak_power,
-                analysis.noise_floor,
-            );
-
-            println!(
-                "center={:.3} MHz peak={:.3} MHz avg={:.3} floor={:.3} peak={:.3} snr≈{:.2} dB",
-                record.center_hz / 1e6,
-                record.estimated_peak_hz / 1e6,
-                record.avg_power,
-                record.noise_floor,
-                record.peak_power,
-                snr_db,
-            );
 
             let record_msg = RecordMessage {
                 kind: "record",
@@ -250,9 +270,8 @@ fn run_scan_loop(
                 bins: analysis.spectrum.clone(),
             };
 
-            completed_dwells += 1;
-
             let _ = waterfall_tx.send(waterfall_msg);
+            println!("sent waterfall frame");
 
             if let Some(hit) = detect_hit(
                 &hit_cfg,
@@ -261,7 +280,6 @@ fn run_scan_loop(
                 &analysis,
                 fft_min_samples,
             ) {
-                detected_hits += 1;
                 log_hit(&hit);
 
                 let hit_msg = HitMessage {
@@ -283,89 +301,56 @@ fn run_scan_loop(
                 planner.reprioritize_near(hit.peak_hz, 0.75, 1_500_000.0);
             }
         }
-
-        println!(
-            "Completed sweep round #{sweep_round} (total dwells: {completed_dwells}, total hits: {detected_hits})"
-        );
     }
 }
 
-async fn ws_waterfall_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_waterfall_socket(socket, state))
+async fn scanner_status_handler(State(state): State<AppState>) -> Json<ScannerStatus> {
+    Json(ScannerStatus {
+        is_running: state.scanner_running.load(Ordering::Relaxed),
+    })
 }
 
-async fn handle_waterfall_socket(socket: WebSocket, state: AppState) {
-    let mut rx = state.waterfall_tx.subscribe();
-    forward_broadcast_to_ws(socket, &mut rx).await;
+async fn scanner_start_handler(State(state): State<AppState>) -> impl IntoResponse {
+    state.scanner_running.store(true, Ordering::Relaxed);
+    (StatusCode::OK, Json(ScannerStatus { is_running: true }))
 }
 
-async fn ws_records_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn scanner_stop_handler(State(state): State<AppState>) -> impl IntoResponse {
+    state.scanner_running.store(false, Ordering::Relaxed);
+    (StatusCode::OK, Json(ScannerStatus { is_running: false }))
+}
+
+async fn ws_records_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| records_socket(socket, state))
 }
 
-async fn ws_hits_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn ws_hits_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| hits_socket(socket, state))
 }
 
-async fn records_socket(mut socket: WebSocket, state: AppState) {
+async fn ws_waterfall_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| waterfall_socket(socket, state))
+}
+
+async fn records_socket(socket: WebSocket, state: AppState) {
+    println!("records websocket client connected");
     let mut rx = state.record_tx.subscribe();
-
-    while let Ok(msg) = rx.recv().await {
-        match serde_json::to_string(&msg) {
-            Ok(text) => {
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
-                }
-            }
-            Err(err) => {
-                eprintln!("failed to serialize record message: {err}");
-            }
-        }
-    }
+    forward_broadcast_to_ws(socket, &mut rx).await;
+    println!("records websocket client disconnected");
 }
 
-async fn hits_socket(mut socket: WebSocket, state: AppState) {
+async fn hits_socket(socket: WebSocket, state: AppState) {
+    println!("hits websocket client connected");
     let mut rx = state.hit_tx.subscribe();
-
-    while let Ok(msg) = rx.recv().await {
-        match serde_json::to_string(&msg) {
-            Ok(text) => {
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
-                }
-            }
-            Err(err) => {
-                eprintln!("failed to serialize hit message: {err}");
-            }
-        }
-    }
+    forward_broadcast_to_ws(socket, &mut rx).await;
+    println!("hits websocket client disconnected");
 }
 
-fn log_hit(hit: &Hit) {
-    println!(
-        "  HIT center={:.3} MHz peak≈{:.3} MHz floor={:.3} peak={:.3} snr≈{:.2} dB",
-        hit.center_hz / 1e6,
-        hit.peak_hz / 1e6,
-        hit.noise_floor,
-        hit.peak_power,
-        hit.snr_db,
-    );
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+async fn waterfall_socket(socket: WebSocket, state: AppState) {
+    println!("waterfall websocket client connected");
+    let mut rx = state.waterfall_tx.subscribe();
+    forward_broadcast_to_ws(socket, &mut rx).await;
+    println!("waterfall websocket client disconnected");
 }
 
 async fn forward_broadcast_to_ws<T>(
@@ -378,8 +363,8 @@ async fn forward_broadcast_to_ws<T>(
         match rx.recv().await {
             Ok(msg) => {
                 match serde_json::to_string(&msg) {
-                    Ok(json) => {
-                        if socket.send(Message::Text(json.into())).await.is_err() {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -391,9 +376,25 @@ async fn forward_broadcast_to_ws<T>(
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 eprintln!("websocket client lagged, skipped {skipped} messages");
             }
-            Err(broadcast::error::RecvError::Closed) => {
-                break;
-            }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn log_hit(hit: &Hit) {
+    println!(
+        "HIT center={:.3} MHz peak={:.3} MHz snr={:.2} dB peak={:.3} floor={:.3}",
+        hit.center_hz / 1e6,
+        hit.peak_hz / 1e6,
+        hit.snr_db,
+        hit.peak_power,
+        hit.noise_floor,
+    );
 }
