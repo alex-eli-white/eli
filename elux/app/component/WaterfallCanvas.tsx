@@ -1,11 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
+
+type HitMessage = {
+    type: "hit";
+    source_id: string;
+    timestamp_ms: number;
+    center_hz: number;
+    peak_hz: number;
+    lower_edge_hz: number;
+    upper_edge_hz: number;
+    peak_bin: number;
+    peak_power: number;
+    noise_floor: number;
+    avg_power: number;
+    snr_db: number;
+};
 
 type WaterfallCanvasProps = {
     width?: number;
     height?: number;
     bins: number[];
+    hits?: HitMessage[];
+    paused?: boolean;
 };
 
 function clamp01(value: number): number {
@@ -67,28 +84,48 @@ function percentile(sorted: number[], q: number): number {
     return sorted[idx];
 }
 
-function normalizeBins(bins: number[]): number[] {
-    if (bins.length === 0) {
+function drawPausedOverlay(ctx: CanvasRenderingContext2D) {
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.fillRect(10, 10, 82, 24);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "12px sans-serif";
+    ctx.fillText("PAUSED", 22, 26);
+}
+
+function normalizeWithRolling(
+    inputBins: number[],
+    rollingMin: number[],
+    rollingMax: number[],
+    rollingWindow: number
+): number[] {
+    if (inputBins.length === 0) {
         return [];
     }
 
-    const dbVals = bins.map((value) =>
-        10 * Math.log10(Math.max(value, 1e-12))
-    );
-
+    const dbVals = inputBins.map((v) => 10 * Math.log10(Math.max(v, 1e-12)));
     const sorted = [...dbVals].sort((a, b) => a - b);
 
-    // Robust display window:
-    // low percentile ≈ background
-    // high percentile ≈ strong signal
-    const lowDb = percentile(sorted, 0.10);
-    const highDb = percentile(sorted, 0.995);
+    const low = percentile(sorted, 0.1);
+    const high = percentile(sorted, 0.995);
 
-    const span = Math.max(highDb - lowDb, 1e-6);
+    rollingMin.push(low);
+    rollingMax.push(high);
+
+    if (rollingMin.length > rollingWindow) {
+        rollingMin.shift();
+    }
+
+    if (rollingMax.length > rollingWindow) {
+        rollingMax.shift();
+    }
+
+    const globalMin = Math.min(...rollingMin);
+    const globalMax = Math.max(...rollingMax);
+    const span = Math.max(globalMax - globalMin, 1e-6);
 
     return dbVals.map((db) => {
-        const normalized = (db - lowDb) / span;
-        return Math.pow(clamp01(normalized), 1.4);
+        const n = (db - globalMin) / span;
+        return Math.pow(clamp01(n), 1.4);
     });
 }
 
@@ -96,10 +133,13 @@ export default function WaterfallCanvas({
                                             width = 768,
                                             height = 480,
                                             bins,
+                                            hits = [],
+                                            paused = false,
                                         }: WaterfallCanvasProps) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-    const normalizedBins = useMemo(() => normalizeBins(bins), [bins]);
+    const rollingMinRef = useRef<number[]>([]);
+    const rollingMaxRef = useRef<number[]>([]);
+    const rollingWindow = 40;
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -114,10 +154,18 @@ export default function WaterfallCanvas({
 
         ctx.fillStyle = "black";
         ctx.fillRect(0, 0, width, height);
-    }, [width, height]);
+
+        if (paused) {
+            drawPausedOverlay(ctx);
+        }
+    }, [width, height, paused]);
 
     useEffect(() => {
-        if (normalizedBins.length === 0) {
+        if (paused) {
+            return;
+        }
+
+        if (bins.length === 0) {
             return;
         }
 
@@ -128,6 +176,17 @@ export default function WaterfallCanvas({
 
         const ctx = canvas.getContext("2d");
         if (!ctx) {
+            return;
+        }
+
+        const normalizedBins = normalizeWithRolling(
+            bins,
+            rollingMinRef.current,
+            rollingMaxRef.current,
+            rollingWindow
+        );
+
+        if (normalizedBins.length === 0) {
             return;
         }
 
@@ -148,7 +207,44 @@ export default function WaterfallCanvas({
         }
 
         ctx.putImageData(row, 0, 0);
-    }, [normalizedBins, width, height]);
+
+        for (const hit of hits) {
+            const x = Math.round(
+                (hit.peak_bin / Math.max(normalizedBins.length - 1, 1)) * (width - 1)
+            );
+            const clampedX = Math.max(0, Math.min(width - 1, x));
+
+            ctx.strokeStyle = "rgba(255, 80, 80, 0.95)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(clampedX + 0.5, 0);
+            ctx.lineTo(clampedX + 0.5, 10);
+            ctx.stroke();
+
+            ctx.fillStyle = "rgba(255, 230, 120, 0.95)";
+            ctx.beginPath();
+            ctx.arc(clampedX, 1, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }, [bins, width, height, hits, paused]);
+
+    useEffect(() => {
+        if (!paused) {
+            return;
+        }
+
+        const canvas = canvasRef.current;
+        if (!canvas) {
+            return;
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            return;
+        }
+
+        drawPausedOverlay(ctx);
+    }, [paused]);
 
     return (
         <div className="overflow-hidden rounded-xl border border-neutral-800 bg-black">

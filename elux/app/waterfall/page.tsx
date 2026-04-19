@@ -52,6 +52,14 @@ function formatHz(hz: number): string {
     return `${hz.toFixed(0)} Hz`;
 }
 
+function sameFrame(hit: HitMessage, frame: WaterfallMessage): boolean {
+    return (
+        hit.source_id === frame.source_id &&
+        hit.timestamp_ms === frame.timestamp_ms &&
+        Math.abs(hit.center_hz - frame.center_hz) < 1
+    );
+}
+
 export default function WaterfallPage() {
     const [recordSocketState, setRecordSocketState] = useState<"connecting" | "open" | "closed">("connecting");
     const [hitSocketState, setHitSocketState] = useState<"connecting" | "open" | "closed">("connecting");
@@ -61,15 +69,27 @@ export default function WaterfallPage() {
     const [recentHits, setRecentHits] = useState<HitMessage[]>([]);
     const [latestWaterfallFrame, setLatestWaterfallFrame] = useState<WaterfallMessage | null>(null);
 
+    const [renderPaused, setRenderPaused] = useState(false);
     const [scannerRunning, setScannerRunning] = useState(true);
     const [scannerBusy, setScannerBusy] = useState(false);
 
+    const renderPausedRef = useRef(false);
+    const latestIncomingFrameRef = useRef<WaterfallMessage | null>(null);
     const reconnectTimers = useRef<number[]>([]);
+
+    useEffect(() => {
+        renderPausedRef.current = renderPaused;
+
+        if (!renderPaused && latestIncomingFrameRef.current) {
+            setLatestWaterfallFrame(latestIncomingFrameRef.current);
+        }
+    }, [renderPaused]);
 
     const clearReconnectTimers = () => {
         reconnectTimers.current.forEach((id) => window.clearTimeout(id));
         reconnectTimers.current = [];
     };
+
     const setScannerState = useCallback(async (running: boolean) => {
         setScannerBusy(true);
 
@@ -91,17 +111,25 @@ export default function WaterfallPage() {
     useEffect(() => {
         const host = window.location.hostname;
         const wsBase = `ws://${host}:9001`;
-        console.log("hostname", window.location.hostname);
-        console.log("wsBase", wsBase);
         let cancelled = false;
 
         const connectRecordSocket = () => {
+            if (cancelled) return null;
+
             setRecordSocketState("connecting");
             const ws = new WebSocket(`${wsBase}/ws/records`);
 
-            ws.onopen = () => setRecordSocketState("open");
-            ws.onerror = () => setRecordSocketState("closed");
+            ws.onopen = () => {
+                if (!cancelled) setRecordSocketState("open");
+            };
+
+            ws.onerror = () => {
+                if (!cancelled) setRecordSocketState("closed");
+            };
+
             ws.onclose = () => {
+                if (cancelled) return;
+
                 setRecordSocketState("closed");
                 const timer = window.setTimeout(connectRecordSocket, 1000);
                 reconnectTimers.current.push(timer);
@@ -122,12 +150,22 @@ export default function WaterfallPage() {
         };
 
         const connectHitSocket = () => {
+            if (cancelled) return null;
+
             setHitSocketState("connecting");
             const ws = new WebSocket(`${wsBase}/ws/hits`);
 
-            ws.onopen = () => setHitSocketState("open");
-            ws.onerror = () => setHitSocketState("closed");
+            ws.onopen = () => {
+                if (!cancelled) setHitSocketState("open");
+            };
+
+            ws.onerror = () => {
+                if (!cancelled) setHitSocketState("closed");
+            };
+
             ws.onclose = () => {
+                if (cancelled) return;
+
                 setHitSocketState("closed");
                 const timer = window.setTimeout(connectHitSocket, 1000);
                 reconnectTimers.current.push(timer);
@@ -137,7 +175,7 @@ export default function WaterfallPage() {
                 try {
                     const msg = JSON.parse(event.data) as HitMessage;
                     if (msg.type === "hit") {
-                        setRecentHits((prev) => [msg, ...prev].slice(0, 20));
+                        setRecentHits((prev) => [msg, ...prev].slice(0, 50));
                     }
                 } catch (error) {
                     console.error("Failed to parse hit message", error);
@@ -148,56 +186,40 @@ export default function WaterfallPage() {
         };
 
         const connectWaterfallSocket = () => {
+            if (cancelled) return null;
+
             setWaterfallSocketState("connecting");
             const ws = new WebSocket(`${wsBase}/ws/waterfall`);
 
-            ws.onopen = () => setWaterfallSocketState("open");
-            ws.onerror = () => setWaterfallSocketState("closed");
+            ws.onopen = () => {
+                if (!cancelled) setWaterfallSocketState("open");
+            };
+
+            ws.onerror = () => {
+                if (!cancelled) setWaterfallSocketState("closed");
+            };
+
             ws.onclose = () => {
+                if (cancelled) return;
+
                 setWaterfallSocketState("closed");
                 const timer = window.setTimeout(connectWaterfallSocket, 1000);
                 reconnectTimers.current.push(timer);
             };
 
-            // ws.onmessage = (event) => {
-            //     try {
-            //         const msg = JSON.parse(event.data) as WaterfallMessage;
-            //         if (msg.type === "waterfall_frame") {
-            //             setLatestWaterfallFrame(msg);
-            //         }
-            //     } catch (error) {
-            //         console.error("Failed to parse waterfall message", error);
-            //     }
-            // };
-
-            // ws.onmessage = (event) => {
-            //     console.log("RAW WATERFALL MESSAGE", event.data);
-            //
-            //     try {
-            //         const msg = JSON.parse(event.data);
-            //         console.log("PARSED WATERFALL", msg);
-            //
-            //         if (msg.type === "waterfall_frame") {
-            //             setLatestWaterfallFrame(msg);
-            //         }
-            //     } catch (e) {
-            //         console.error("parse fail", e);
-            //     }
-            // };
-
             ws.onmessage = (event) => {
-                console.log("RAW:", event.data);
-
                 try {
-                    const parsed = JSON.parse(event.data);
-                    console.log("PARSED:", parsed);
+                    const parsed = JSON.parse(event.data) as WaterfallMessage;
 
-                    console.log("KEYS:", Object.keys(parsed));
+                    if (parsed.type !== "waterfall_frame" || !Array.isArray(parsed.bins)) {
+                        return;
+                    }
 
-                    console.log("bins exists?", parsed.bins);
-                    console.log("bins length?", parsed.bins?.length);
+                    latestIncomingFrameRef.current = parsed;
 
-                    setLatestWaterfallFrame(parsed);
+                    if (!renderPausedRef.current) {
+                        setLatestWaterfallFrame(parsed);
+                    }
                 } catch (err) {
                     console.error("parse error", err);
                 }
@@ -226,11 +248,12 @@ export default function WaterfallPage() {
         return () => {
             cancelled = true;
             clearReconnectTimers();
-            recordWs.close();
-            hitWs.close();
-            waterfallWs.close();
+            recordWs?.close();
+            hitWs?.close();
+            waterfallWs?.close();
         };
     }, []);
+
     const strongestHit = useMemo(() => {
         if (recentHits.length === 0) return null;
         return [...recentHits].sort((a, b) => b.snr_db - a.snr_db)[0];
@@ -256,6 +279,14 @@ export default function WaterfallPage() {
         return "closed";
     }, [recordSocketState, hitSocketState, waterfallSocketState]);
 
+    const displayedFrameHits = useMemo(() => {
+        if (!latestWaterfallFrame) {
+            return [];
+        }
+
+        return recentHits.filter((hit) => sameFrame(hit, latestWaterfallFrame));
+    }, [recentHits, latestWaterfallFrame]);
+
     return (
         <main className="min-h-screen bg-neutral-950 text-neutral-100">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 p-6">
@@ -271,6 +302,13 @@ export default function WaterfallPage() {
                         </div>
 
                         <div className="flex items-center gap-3">
+                            <button
+                                onClick={() => setRenderPaused((prev) => !prev)}
+                                className="rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2 text-sm font-medium hover:bg-neutral-800"
+                            >
+                                {renderPaused ? "Resume View" : "Pause View"}
+                            </button>
+
                             <button
                                 onClick={() => setScannerState(!scannerRunning)}
                                 disabled={scannerBusy}
@@ -296,11 +334,18 @@ export default function WaterfallPage() {
                         </div>
                     </div>
 
-                    <div className="mt-5 grid gap-3 md:grid-cols-5">
+                    <div className="mt-5 grid gap-3 md:grid-cols-6">
                         <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
                             <div className="text-xs uppercase tracking-wide text-neutral-500">Scanner</div>
                             <div className="mt-1 text-sm font-medium">
                                 {scannerRunning ? "Running" : "Stopped"}
+                            </div>
+                        </div>
+
+                        <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-3">
+                            <div className="text-xs uppercase tracking-wide text-neutral-500">Render</div>
+                            <div className="mt-1 text-sm font-medium">
+                                {renderPaused ? "Paused" : "Live"}
                             </div>
                         </div>
 
@@ -345,21 +390,49 @@ export default function WaterfallPage() {
                                 <h2 className="text-lg font-semibold">Waterfall</h2>
                                 <p className="text-sm text-neutral-400">
                                     {latestWaterfallFrame
-                                        ? `Live FFT bins: ${latestWaterfallFrame.bins.length}`
+                                        ? `FFT bins: ${latestWaterfallFrame.bins.length}`
                                         : "Waiting for real FFT bin stream from backend."}
                                 </p>
                             </div>
 
-                            <div className="text-xs text-neutral-500">
-                                {latestRecord
-                                    ? `peak ${formatHz(latestRecord.estimated_peak_hz)}`
-                                    : "No record"}
+                            <div className="text-right text-xs text-neutral-500">
+                                <div>{renderPaused ? "frame frozen" : "live rendering"}</div>
+                                <div>
+                                    {latestRecord
+                                        ? `peak ${formatHz(latestRecord.estimated_peak_hz)}`
+                                        : "No record"}
+                                </div>
                             </div>
                         </div>
-                        <div className="mb-2 rounded bg-blue-900 px-3 py-2 text-sm text-white">
-                            frame bins: {latestWaterfallFrame?.bins?.length ?? 0}
+
+                        <WaterfallCanvas
+                            bins={latestWaterfallFrame?.bins ?? []}
+                            hits={displayedFrameHits}
+                            paused={renderPaused}
+                        />
+
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-neutral-500">
+                            <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-left">
+                                <div className="uppercase tracking-wide text-neutral-600">Lower Edge</div>
+                                <div className="mt-1 text-sm text-neutral-300">
+                                    {latestWaterfallFrame ? formatHz(latestWaterfallFrame.lower_edge_hz) : "—"}
+                                </div>
+                            </div>
+
+                            <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-center">
+                                <div className="uppercase tracking-wide text-neutral-600">Center</div>
+                                <div className="mt-1 text-sm text-neutral-300">
+                                    {latestWaterfallFrame ? formatHz(latestWaterfallFrame.center_hz) : "—"}
+                                </div>
+                            </div>
+
+                            <div className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-right">
+                                <div className="uppercase tracking-wide text-neutral-600">Upper Edge</div>
+                                <div className="mt-1 text-sm text-neutral-300">
+                                    {latestWaterfallFrame ? formatHz(latestWaterfallFrame.upper_edge_hz) : "—"}
+                                </div>
+                            </div>
                         </div>
-                        <WaterfallCanvas bins={latestWaterfallFrame?.bins ?? []} />
                     </div>
 
                     <aside className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4 shadow-sm">
@@ -370,7 +443,7 @@ export default function WaterfallPage() {
                             </p>
                         </div>
 
-                        <div className="flex max-h-[480px] flex-col gap-3 overflow-y-auto pr-1">
+                        <div className="flex max-h-480-px flex-col gap-3 overflow-y-auto pr-1">
                             {recentHits.length === 0 ? (
                                 <div className="rounded-xl border border-dashed border-neutral-700 bg-neutral-950 p-4 text-sm text-neutral-500">
                                     No hits yet.

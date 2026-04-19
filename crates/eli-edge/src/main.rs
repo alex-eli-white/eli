@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors)
         .with_state(state);
 
-    let addr: SocketAddr = "127.0.0.1:9001".parse()?;
+    let addr: SocketAddr = "0.0.0.0:9001".parse()?;
 
     println!("about to bind listener on {addr}");
     let listener = TcpListener::bind(addr).await?;
@@ -213,7 +213,7 @@ fn run_scan_loop(
 
 
 
-            let samples = dwell_capture(
+            let samples = match dwell_capture(
                 &mut stream,
                 point.center_hz,
                 dwell_ms,
@@ -222,7 +222,19 @@ fn run_scan_loop(
                     flush_count: 2,
                     timeout_us: 250_000,
                 },
-            )?;
+            ) {
+                Ok(samples) => samples,
+                Err(err) => {
+                    let msg = err.to_string();
+
+                    if msg.contains("Overflow") {
+                        eprintln!("scanner overflow at {:.3} MHz; continuing", point.center_hz / 1_000_000.0);
+                        continue;
+                    }
+
+                    return Err(err);
+                }
+            };
 
             if samples.len() < fft_min_samples {
                 continue;
