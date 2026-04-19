@@ -153,12 +153,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge-router"
+version = "0.1.0"
+
+[[package]]
 name = "eli-edge"
 version = "0.1.0"
 dependencies = [
  "axum",
  "crossbeam-channel",
  "num-complex",
+ "rand",
  "rustfft",
  "serde",
  "serde_json",
@@ -721,6 +726,10 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "stream-hub"
+version = "0.1.0"
 
 [[package]]
 name = "strength_reduce"

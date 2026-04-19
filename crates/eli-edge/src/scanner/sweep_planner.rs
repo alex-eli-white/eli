@@ -1,3 +1,6 @@
+use rand::seq::SliceRandom;
+use crate::scanner::config::HotspotConfig;
+
 #[derive(Debug, Clone, Copy)]
 pub struct SweepPoint {
     pub center_hz: f64,
@@ -6,8 +9,8 @@ pub struct SweepPoint {
     pub priority: f32,
 }
 
-#[derive(Debug, Clone)]
-pub struct SweepPlannerConfig {
+#[derive(Debug, Clone, Copy)]
+pub struct SweepCoverage {
     pub start_hz: f64,
     pub end_hz: f64,
     pub sample_rate_hz: f64,
@@ -15,19 +18,37 @@ pub struct SweepPlannerConfig {
     pub overlap_fraction: f64,
 }
 
-impl SweepPlannerConfig {
+impl SweepCoverage {
     pub fn step_hz(&self) -> f64 {
         self.usable_bandwidth_hz * (1.0 - self.overlap_fraction)
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SweepPolicy {
+    Sequential,
+    PriorityHotspots,
+    WeightedHotspots,
+    Randomized,
+}
+
+
+
+#[derive(Debug, Clone, Copy)]
+pub struct SweepExecution {
+    pub dwell_ms: u64,
+    pub settle_ms: u64,
+    pub flush_count: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct SweepPlanner {
     points: Vec<SweepPoint>,
     usable_bandwidth_hz: f64,
 }
 
 impl SweepPlanner {
-    pub fn new_linear(config: SweepPlannerConfig) -> Self {
+    pub fn new_linear(config: SweepCoverage) -> Self {
         let mut points = Vec::new();
         let step_hz = config.step_hz();
         let half_span_hz = config.sample_rate_hz / 2.0;
@@ -49,7 +70,7 @@ impl SweepPlanner {
         }
     }
 
-    pub fn new_priority(config: SweepPlannerConfig, hotspots: &[(f64, f32)]) -> Self {
+    pub fn new_priority(config: SweepCoverage, hotspots: &[(f64, f32)]) -> Self {
         let mut planner = Self::new_linear(config);
         let usable_bandwidth_hz = planner.usable_bandwidth_hz;
 
@@ -64,6 +85,13 @@ impl SweepPlanner {
         }
 
         planner.sort_by_priority();
+        planner
+    }
+
+    pub fn new_randomized(config: SweepCoverage) -> Self {
+        let mut planner = Self::new_linear(config);
+        let mut rng = rand::rngs::ThreadRng::default();
+        planner.points.shuffle(&mut rng);
         planner
     }
 
@@ -89,6 +117,43 @@ impl SweepPlanner {
         }
 
         self.sort_by_priority();
+    }
+
+    pub fn new_weighted(
+        config: SweepCoverage,
+        hotspots: &[HotspotConfig],
+    ) -> Self {
+        let mut planner = Self::new_linear(config.clone());
+
+        let mut extra_points = Vec::new();
+
+        // how far around hotspot we consider "near"
+        let influence_hz = config.usable_bandwidth_hz;
+
+        for hotspot in hotspots {
+            let weight = hotspot.weight.max(0.0);
+
+            if weight == 0.0 {
+                continue;
+            }
+
+            // scale weight into duplication count
+            let repeats = weight.round() as usize;
+
+            for point in &planner.points {
+                let distance = (point.center_hz - hotspot.center_hz).abs();
+
+                if distance <= influence_hz {
+                    for _ in 0..repeats {
+                        extra_points.push(point.clone());
+                    }
+                }
+            }
+        }
+
+        planner.points.extend(extra_points);
+
+        planner
     }
 
     fn sort_by_priority(&mut self) {
