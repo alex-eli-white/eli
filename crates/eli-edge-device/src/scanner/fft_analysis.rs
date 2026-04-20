@@ -1,19 +1,6 @@
 use num_complex::Complex32;
-
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::AnalysisResult;
 use crate::helpers::{dc::remove_dc, fft::compute_fft};
-
-#[derive(Debug, Clone)]
-pub struct AnalysisResult {
-    pub avg_power: f32,
-    pub noise_floor: f32,
-    pub center_hz: f64,
-    pub peak_bin: usize,
-    pub peak_power: f32,
-    pub estimated_peak_hz: f64,
-    pub lower_edge_hz: f64,
-    pub upper_edge_hz: f64,
-    pub spectrum: Vec<f32>,
-}
 
 pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> AnalysisResult {
     let centered = remove_dc(samples);

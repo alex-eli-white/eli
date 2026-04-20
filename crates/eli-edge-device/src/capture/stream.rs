@@ -1,5 +1,6 @@
 use num_complex::Complex32;
 use soapysdr::{Device, Direction};
+use crate::scanner::EdgeResult;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IqSample {
@@ -31,7 +32,7 @@ impl RtlStream {
         mut device: Device,
         center_hz: f64,
         sample_rate: f64,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> EdgeResult<Self> {
         device.set_sample_rate(Direction::Rx, 0, sample_rate)?;
         device.set_frequency(Direction::Rx, 0, center_hz, ())?;
 
@@ -44,28 +45,28 @@ impl RtlStream {
         })
     }
 
-    pub fn activate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn activate(&mut self) -> EdgeResult<()> {
         self.stream.activate(None)?;
         Ok(())
     }
 
-    pub fn deactivate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn deactivate(&mut self) -> EdgeResult<()> {
         self.stream.deactivate(None)?;
         Ok(())
     }
 
-    pub fn current_sample_rate(&self) -> Result<f64, Box<dyn std::error::Error>> {
+    pub fn current_sample_rate(&self) -> EdgeResult<f64> {
         Ok(self.device.sample_rate(Direction::Rx, 0)?)
     }
 
-    pub fn current_frequency(&self) -> Result<f64, Box<dyn std::error::Error>> {
+    pub fn current_frequency(&self) -> EdgeResult<f64> {
         Ok(self.device.frequency(Direction::Rx, 0)?)
     }
 
     pub fn read_samples(
         &mut self,
         timeout_us: i64,
-    ) -> Result<Vec<IqSample>, Box<dyn std::error::Error>> {
+    ) -> EdgeResult<Vec<IqSample>> {
         let mut buffers = [&mut self.scratch[..]];
         let count = self.stream.read(&mut buffers, timeout_us)?;
 
@@ -85,7 +86,7 @@ impl RtlStream {
         &mut self,
         count: i64,
         timeout_us: i64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> EdgeResult<()> {
         for _ in 0..count {
             let _ = self.read_samples(timeout_us)?;
         }
@@ -93,7 +94,7 @@ impl RtlStream {
         Ok(())
     }
 
-    pub fn set_frequency(&mut self, freq: f64) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_frequency(&mut self, freq: f64) -> EdgeResult<()> {
         self.device.set_frequency(Direction::Rx, 0, freq, ())?;
         Ok(())
     }

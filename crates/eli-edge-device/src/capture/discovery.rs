@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Debug};
 
 use soapysdr::{Args, Device, Direction};
+use crate::scanner::EdgeResult;
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredDevice {
@@ -16,7 +17,7 @@ pub struct DiscoveredDevice {
     pub frequency_ranges: Vec<soapysdr::Range>,
 }
 
-pub fn discover_rtlsdr_devices() -> Result<Vec<DiscoveredDevice>, Box<dyn std::error::Error>> {
+pub fn discover_rtlsdr_devices() -> EdgeResult<Vec<DiscoveredDevice>> {
     let results = soapysdr::enumerate("driver=rtlsdr")?;
 
     let mut devices = Vec::new();
@@ -64,7 +65,7 @@ pub fn discover_rtlsdr_devices() -> Result<Vec<DiscoveredDevice>, Box<dyn std::e
     Ok(devices)
 }
 
-pub fn open_first_rtlsdr() -> Result<Device, Box<dyn std::error::Error>> {
+pub fn open_first_rtlsdr() -> EdgeResult<Device> {
     let results = soapysdr::enumerate("driver=rtlsdr")?;
     let args = results
         .into_iter()
@@ -88,7 +89,7 @@ fn turn_args_hashmap(args: &Args) -> HashMap<String, String> {
 }
 
 
-pub fn open_rtlsdr_by_index(index: usize) -> Result<Device, Box<dyn std::error::Error>> {
+pub fn open_rtlsdr_by_index(index: usize) -> EdgeResult<Device> {
     let devices = discover_rtlsdr_devices()?;
 
     let info = devices

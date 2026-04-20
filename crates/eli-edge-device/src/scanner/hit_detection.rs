@@ -1,36 +1,6 @@
-use crate::scanner::fft_analysis::AnalysisResult;
+use eli_protocol::edge_vanilla::scanner::config_vanilla::{Hit, HitDetectorConfig};
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::AnalysisResult;
 
-#[derive(Debug, Clone)]
-pub struct HitDetectorConfig {
-    pub min_snr_db: f32,
-    pub min_peak_power: f32,
-    pub edge_exclusion_bins: usize,
-}
-
-impl Default for HitDetectorConfig {
-    fn default() -> Self {
-        Self {
-            min_snr_db: 12.0,
-            min_peak_power: 0.0001,
-            edge_exclusion_bins: 8,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Hit {
-    pub source_id: String,
-    pub center_hz: f64,
-    pub peak_hz: f64,
-    pub lower_edge_hz: f64,
-    pub upper_edge_hz: f64,
-    pub peak_bin: usize,
-    pub peak_power: f32,
-    pub noise_floor: f32,
-    pub avg_power: f32,
-    pub snr_db: f32,
-    pub timestamp_ms: u64,
-}
 
 pub fn estimate_snr_db(peak_power: f32, noise_floor: f32) -> f32 {
     let floor = noise_floor.max(1e-12);

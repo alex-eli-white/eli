@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 
 use eli_edge_device::capture::discovery::open_rtlsdr_by_index;
 use eli_edge_device::capture::stream::RtlStream;
-use eli_edge_device::scanner::config::ScannerConfig;
+use eli_edge_device::scanner::edge_error::EdgeError;
 use eli_edge_device::scanner::runner::ScannerRunner;
-use eli_edge_device::scanner::vanilla::EdgeEvent;
-use serde::{Deserialize, Serialize};
+use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent, StatusMessage};
 
 #[derive(Debug, Parser)]
 struct EdgeDeviceArgs {
@@ -27,40 +27,51 @@ struct EdgeDeviceArgs {
     device_index: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EdgeCommand {
-    SetConfig(ScannerConfig),
-    Start,
-    Stop,
-    Ping,
-    Shutdown,
-}
-
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), EdgeError> {
     let args = EdgeDeviceArgs::parse();
 
     let stream = UnixStream::connect(&args.socket_path).await?;
     let (read_half, mut write_half) = stream.into_split();
 
     let scanner_running = Arc::new(AtomicBool::new(false));
-
-    let dev = open_rtlsdr_by_index(args.device_index)?;
-    let initial_center_hz = 96_300_000.0;
-    let initial_sample_rate_hz = 2_048_000.0;
-    let rtl_stream = RtlStream::open(dev, initial_center_hz, initial_sample_rate_hz)?;
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let dropped_events = Arc::new(AtomicU64::new(0));
 
     let initial_config = ScannerConfig::default_for_worker(args.worker_id.clone());
-
-    let runner = Arc::new(Mutex::new(ScannerRunner::new(
-        rtl_stream,
-        initial_config,
-        scanner_running.clone(),
+    let pending_config = Arc::new(Mutex::new(Some(initial_config.clone())));
+    let status_identity = Arc::new(Mutex::new((
+        initial_config.edge_id.clone(),
+        initial_config.source_id.clone(),
     )));
+
+    let dev = open_rtlsdr_by_index(args.device_index)?;
+    let rtl_stream = RtlStream::open(
+        dev,
+        initial_config.default_center_hz(),
+        initial_config.sample_rate_hz,
+    )?;
+
+    let runner = ScannerRunner::new(
+        rtl_stream,
+        initial_config.clone(),
+        pending_config.clone(),
+        scanner_running.clone(),
+        shutdown_requested.clone(),
+        dropped_events.clone(),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<EdgeEvent>(256);
 
-    // writer task: send edge events to router
+    let _ = event_tx
+        .try_send(EdgeEvent::Status(StatusMessage::new(
+            initial_config.edge_id.clone(),
+            initial_config.source_id.clone(),
+            "connected",
+            format!("worker {} connected to router", args.worker_id),
+        )))
+        .ok();
+
     let writer_task = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             let line = serde_json::to_string(&event)?;
@@ -68,51 +79,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             write_half.write_all(b"\n").await?;
         }
 
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        Ok::<(), EdgeError>(())
     });
 
-    // command reader task
-    let runner_for_cmd = runner.clone();
     let scanner_running_for_cmd = scanner_running.clone();
+    let shutdown_requested_for_cmd = shutdown_requested.clone();
+    let pending_config_for_cmd = pending_config.clone();
+    let dropped_events_for_cmd = dropped_events.clone();
+    let event_tx_for_cmd = event_tx.clone();
+    let status_identity_for_cmd = status_identity.clone();
     let command_task = tokio::spawn(async move {
         let mut lines = BufReader::new(read_half).lines();
 
-        while let Some(line) = lines.next_line().await? {
-            let cmd: EdgeCommand = serde_json::from_str(&line)?;
+        loop {
+            match lines.next_line().await? {
+                Some(line) => {
+                    let cmd: EdgeCommand = serde_json::from_str(&line)?;
 
-            match cmd {
-                EdgeCommand::SetConfig(cfg) => {
-                    let mut runner = runner_for_cmd.lock().unwrap();
-                    runner.pending_config = Some(cfg);
+                    match cmd {
+                        EdgeCommand::SetConfig(cfg) => {
+                            let edge_id = cfg.edge_id.clone();
+                            let source_id = cfg.source_id.clone();
+                            {
+                                let mut pending = pending_config_for_cmd.lock().unwrap();
+                                *pending = Some(cfg);
+                            }
+                            {
+                                let mut identity = status_identity_for_cmd.lock().unwrap();
+                                *identity = (edge_id.clone(), source_id.clone());
+                            }
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(StatusMessage::new(
+                                edge_id,
+                                source_id,
+                                "config_pending",
+                                "received scanner configuration",
+                            )));
+                        }
+                        EdgeCommand::Start => {
+                            scanner_running_for_cmd.store(true, Ordering::Relaxed);
+                            let (edge_id, source_id) = {
+                                let identity = status_identity_for_cmd.lock().unwrap();
+                                identity.clone()
+                            };
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(StatusMessage::new(
+                                edge_id,
+                                source_id,
+                                "started",
+                                "scanner start requested",
+                            )));
+                        }
+                        EdgeCommand::Stop => {
+                            scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                            let (edge_id, source_id) = {
+                                let identity = status_identity_for_cmd.lock().unwrap();
+                                identity.clone()
+                            };
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(StatusMessage::new(
+                                edge_id,
+                                source_id,
+                                "stopped",
+                                "scanner stop requested",
+                            )));
+                        }
+                        EdgeCommand::Ping => {
+                            let dropped = dropped_events_for_cmd.load(Ordering::Relaxed);
+                            let (edge_id, source_id) = {
+                                let identity = status_identity_for_cmd.lock().unwrap();
+                                identity.clone()
+                            };
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(StatusMessage::new(
+                                edge_id,
+                                source_id,
+                                "pong",
+                                format!("worker alive; dropped_events={dropped}"),
+                            )));
+                        }
+                        EdgeCommand::Shutdown => {
+                            scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                            shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
+                            let (edge_id, source_id) = {
+                                let identity = status_identity_for_cmd.lock().unwrap();
+                                identity.clone()
+                            };
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(StatusMessage::new(
+                                edge_id,
+                                source_id,
+                                "shutdown",
+                                "worker shutdown requested",
+                            )));
+                            break;
+                        }
+                    }
                 }
-                EdgeCommand::Start => {
-                    scanner_running_for_cmd.store(true, Ordering::Relaxed);
-                }
-                EdgeCommand::Stop => {
+                None => {
                     scanner_running_for_cmd.store(false, Ordering::Relaxed);
-                }
-                EdgeCommand::Ping => {
-                    // later: emit a Status/Pong event
-                }
-                EdgeCommand::Shutdown => {
-                    scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                    shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
                     break;
                 }
             }
         }
 
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        Ok::<(), EdgeError>(())
     });
 
-    // scanner task
-    let runner_for_scan = runner.clone();
-    let scanner_task = tokio::task::spawn_blocking(move || {
-        let mut runner = runner_for_scan.lock().unwrap();
-        runner.run_edge_loop(event_tx);
-    });
+    let scanner_task = tokio::task::spawn_blocking(move || runner.run_edge_loop(event_tx));
 
     let _ = tokio::try_join!(writer_task, command_task)?;
-    let _ = scanner_task.await?;
+    scanner_task.await??;
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
-
+use crate::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageKind {
@@ -112,6 +112,16 @@ impl FreqRange {
             center_hz,
         }
     }
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EdgeCommand {
+    SetConfig(ScannerConfig),
+    Start,
+    Stop,
+    Ping,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,4 +284,39 @@ pub enum EdgeEvent {
     Record(RecordMessage),
     Waterfall(Box<WaterfallMessage>),
     IqChunk(IqChunkMessage),
+}
+
+impl StatusMessage {
+    pub fn new(
+        edge_id: String,
+        source_id: String,
+        status: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            r#type: MessageKind::Status.as_str().to_string(),
+            edge_id,
+            source_id,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            status: status.into(),
+            message: message.into(),
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct AnalysisResult {
+    pub avg_power: f32,
+    pub noise_floor: f32,
+    pub center_hz: f64,
+    pub peak_bin: usize,
+    pub peak_power: f32,
+    pub estimated_peak_hz: f64,
+    pub lower_edge_hz: f64,
+    pub upper_edge_hz: f64,
+    pub spectrum: Vec<f32>,
 }

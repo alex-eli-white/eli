@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use crate::scanner::vanilla::IqCaptureMode;
-use super::dwell_capture::SettleStrategy;
-use super::sweep_planner::{SweepCoverage, SweepExecution, SweepPolicy};
-
+use crate::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
+use crate::edge_vanilla::scanner::sweep_vanilla::{SweepCoverage, SweepExecution, SweepPolicy};
+use crate::edge_vanilla::scanner::msg_vanilla::IqCaptureMode;
 
 pub const DEFAULT_SAMPLE_TIMEOUT : i64 = 1_000_000;
 
@@ -42,6 +41,14 @@ pub struct ScannerConfig {
 }
 
 impl ScannerConfig {
+    pub fn default_center_hz(&self) -> f64 {
+        match &self.mode {
+            ScannerMode::Fixed(cfg) => cfg.center_hz,
+            ScannerMode::Sweep(cfg) => cfg.coverage.start_hz,
+            ScannerMode::Idle => 96_300_000.0,
+        }
+    }
+
     pub fn default_for_worker(worker_id: String) -> Self {
         Self {
             edge_id: worker_id,
@@ -68,4 +75,36 @@ pub enum ScannerCommand {
     Start,
     Stop,
     SetConfig(ScannerConfig),
+}
+
+#[derive(Debug, Clone)]
+pub struct HitDetectorConfig {
+    pub min_snr_db: f32,
+    pub min_peak_power: f32,
+    pub edge_exclusion_bins: usize,
+}
+
+impl Default for HitDetectorConfig {
+    fn default() -> Self {
+        Self {
+            min_snr_db: 12.0,
+            min_peak_power: 0.0001,
+            edge_exclusion_bins: 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Hit {
+    pub source_id: String,
+    pub center_hz: f64,
+    pub peak_hz: f64,
+    pub lower_edge_hz: f64,
+    pub upper_edge_hz: f64,
+    pub peak_bin: usize,
+    pub peak_power: f32,
+    pub noise_floor: f32,
+    pub avg_power: f32,
+    pub snr_db: f32,
+    pub timestamp_ms: u64,
 }

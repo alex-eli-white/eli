@@ -1,35 +1,16 @@
 use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
+use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
+use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
 use crate::capture::stream::RtlStream;
-use crate::scanner::config::DEFAULT_SAMPLE_TIMEOUT;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SettleStrategy {
-    SleepOnly { millis: u64 },
-    FlushBuffers { count: i64, timeout_us: i64 },
-    SleepAndFlush {
-        millis: u64,
-        flush_count: i64,
-        timeout_us: i64,
-    },
-}
-
-impl Default for SettleStrategy {
-    fn default() -> Self {
-        Self::SleepAndFlush {
-            millis: 5,
-            flush_count: 2,
-            timeout_us: 250_000,
-        }
-    }
-}
+use crate::scanner::EdgeResult;
 
 pub fn dwell_capture(
     stream: &mut RtlStream,
     freq: f64,
     dwell_ms: u64,
     settle: &SettleStrategy,
-) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
+) -> EdgeResult<Vec<Complex32>> {
     stream.set_frequency(freq)?;
 
     match settle {

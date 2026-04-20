@@ -1,21 +1,32 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::scanner::config::*;
-use crate::scanner::dwell_capture::dwell_capture;
-use crate::scanner::fft_analysis::{analyze, AnalysisResult};
-use crate::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
-use crate::scanner::sweep_planner::{SweepPlanner, SweepPolicy};
-use crate::scanner::vanilla::{BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
 use tokio::sync::mpsc;
+
+
+
+use eli_protocol::edge_vanilla::scanner::config_vanilla::{FixedModeConfig, Hit, HitDetectorConfig, ScannerConfig, ScannerMode, SweepModeConfig};
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{AnalysisResult, BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
+use eli_protocol::edge_vanilla::scanner::sweep_vanilla::SweepPolicy;
+use crate::scanner::dwell_capture::dwell_capture;
+use crate::scanner::edge_error::EdgeError;
+use crate::scanner::EdgeResult;
+use crate::scanner::fft_analysis::analyze;
+use crate::scanner::hit_detection::detect_hit;
+use crate::scanner::sweep_planner::SweepPlanner;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct ScannerRunner {
     pub stream: crate::capture::stream::RtlStream,
     pub active_config: ScannerConfig,
-    pub pending_config: Option<ScannerConfig>,
+    pub pending_config: Arc<Mutex<Option<ScannerConfig>>>,
     pub scanner_running: Arc<AtomicBool>,
+    pub shutdown_requested: Arc<AtomicBool>,
+    pub dropped_events: Arc<AtomicU64>,
 }
 
 struct EmitContext<'a> {
@@ -23,7 +34,7 @@ struct EmitContext<'a> {
     source_id: &'a str,
     sample_rate_hz: f64,
     fft_size: usize,
-    edge_tx : &'a mpsc::Sender<EdgeEvent>,
+    edge_tx: &'a mpsc::Sender<EdgeEvent>,
     hit_cfg: &'a HitDetectorConfig,
 }
 
@@ -31,23 +42,45 @@ impl ScannerRunner {
     pub fn new(
         stream: crate::capture::stream::RtlStream,
         config: ScannerConfig,
+        pending_config: Arc<Mutex<Option<ScannerConfig>>>,
         scanner_running: Arc<AtomicBool>,
+        shutdown_requested: Arc<AtomicBool>,
+        dropped_events: Arc<AtomicU64>,
     ) -> Self {
         Self {
             stream,
             active_config: config,
-            pending_config: None,
+            pending_config,
             scanner_running,
+            shutdown_requested,
+            dropped_events,
         }
     }
 
-    fn apply_pending_config(&mut self) -> Result<bool> {
-        if let Some(new_cfg) = self.pending_config.take() {
+    fn apply_pending_config(&mut self) -> EdgeResult<bool> {
+        let new_cfg = {
+            let mut pending = self.pending_config.lock().unwrap();
+            pending.take()
+        };
+
+        if let Some(new_cfg) = new_cfg {
             self.active_config = new_cfg;
             return Ok(true);
         }
 
         Ok(false)
+    }
+
+    fn try_emit(&self, edge_tx: &mpsc::Sender<EdgeEvent>, event: EdgeEvent) {
+        if edge_tx.try_send(event).is_err() {
+            let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped.is_multiple_of(100) {
+                eprintln!(
+                    "edge event backpressure: dropped_events={} edge_id={} source_id={}",
+                    dropped, self.active_config.edge_id, self.active_config.source_id
+                );
+            }
+        }
     }
 
     fn linear_to_db_bins(bins: &[f32]) -> Vec<f32> {
@@ -58,9 +91,7 @@ impl ScannerRunner {
 
     fn build_planner(&self, mode_cfg: &SweepModeConfig) -> SweepPlanner {
         match mode_cfg.policy {
-            SweepPolicy::Sequential => {
-                SweepPlanner::new_linear(&mode_cfg.coverage)
-            }
+            SweepPolicy::Sequential => SweepPlanner::new_linear(&mode_cfg.coverage),
             SweepPolicy::PriorityHotspots => {
                 let hotspot_pairs: Vec<(f64, f32)> = mode_cfg
                     .hotspots
@@ -70,9 +101,7 @@ impl ScannerRunner {
 
                 SweepPlanner::new_priority(&mode_cfg.coverage, &hotspot_pairs)
             }
-            SweepPolicy::Randomized => {
-                SweepPlanner::new_randomized(&mode_cfg.coverage)
-            }
+            SweepPolicy::Randomized => SweepPlanner::new_randomized(&mode_cfg.coverage),
             SweepPolicy::WeightedHotspots => {
                 SweepPlanner::new_weighted(&mode_cfg.coverage, &mode_cfg.hotspots)
             }
@@ -84,108 +113,99 @@ impl ScannerRunner {
         analysis: &AnalysisResult,
         timestamp_ms: u128,
         ctx: &EmitContext,
-    ) -> Result<Option<Hit>> {
+    ) -> EdgeResult<Option<Hit>> {
         let edge_id = ctx.edge_id.to_string();
         let source_id = ctx.source_id.to_string();
 
+        let snr_db =
+            10.0 * f32::log10((analysis.peak_power / analysis.noise_floor.max(1e-12)).max(1e-12));
 
-
-        let snr_db = 10.0 * f32::log10(
-            (analysis.peak_power / analysis.noise_floor.max(1e-12)).max(1e-12)
+        let record_ctx = RecordCtx::new(
+            MessageKind::Record,
+            edge_id.clone(),
+            source_id.clone(),
+            timestamp_ms,
         );
 
-        let record_ctx = RecordCtx {
-            r#type: MessageKind::Record.as_str().to_string(),
-            edge_id: edge_id.clone(),
-            source_id: source_id.clone(),
-            timestamp_ms,
-        };
+        let freq_range = FreqRange::new(
+            analysis.lower_edge_hz,
+            analysis.upper_edge_hz,
+            analysis.center_hz,
+        );
 
-        let freq_range = FreqRange{
-            center_hz: analysis.center_hz,
-            lower_edge_hz: analysis.lower_edge_hz,
-            upper_edge_hz: analysis.upper_edge_hz,
-        };
-
-        let power_ctx = PowerCtx::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz), analysis.noise_floor, analysis.avg_power, Some(snr_db));
+        let linear_power_ctx = PowerCtx::new(
+            analysis.peak_bin,
+            analysis.peak_power,
+            analysis.center_hz,
+            Some(analysis.estimated_peak_hz),
+            analysis.noise_floor,
+            analysis.avg_power,
+            Some(snr_db),
+        );
 
         let record_msg = RecordMessage {
-            record_ctx:record_ctx.clone(),
-            freq_range,
-            power_ctx,
-            record_message_kind : RecordMessageKind::General,
+            record_ctx: record_ctx.clone(),
+            freq_range: freq_range.clone(),
+            power_ctx: linear_power_ctx.clone(),
+            record_message_kind: RecordMessageKind::General,
         };
 
-        let edge_event = EdgeEvent::Record(record_msg);
+        self.try_emit(ctx.edge_tx, EdgeEvent::Record(record_msg));
 
-        let _ = ctx.edge_tx.try_send(edge_event).ok();
-
-
-        let freq_range = FreqRange{
-            center_hz: analysis.center_hz,
-            lower_edge_hz: analysis.lower_edge_hz,
-            upper_edge_hz: analysis.upper_edge_hz,
-        };
-
-        let power_ctx = PowerCtx::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz), analysis.noise_floor, analysis.avg_power, Some(snr_db));
-
-
-        let record_ctx = RecordCtx {
-            r#type: MessageKind::Spectrum.as_str().to_string(),
-            edge_id: edge_id.clone(),
-            source_id: source_id.clone(),
+        let spectrum_ctx = RecordCtx::new(
+            MessageKind::Spectrum,
+            edge_id.clone(),
+            source_id.clone(),
             timestamp_ms,
-        };
+        );
 
         let linear_frame = SpectrumFrame::new(
-            record_ctx.clone(),
+            spectrum_ctx.clone(),
             freq_range.clone(),
             ctx.sample_rate_hz,
             ctx.fft_size,
             BinValueKind::LinearPower,
-            power_ctx,
+            linear_power_ctx,
             analysis.spectrum.clone(),
         )
-            .map_err(|e| format!("failed to build linear spectrum frame: {e}"))?;
+        .map_err(|e| format!("failed to build linear spectrum frame: {e}"))?;
 
         let db_bins = Self::linear_to_db_bins(&analysis.spectrum);
-
-        let db_peak_power = 10.0 * f32::log10(analysis.peak_power.max(1e-12));
-        let db_noise_floor = 10.0 * f32::log10(analysis.noise_floor.max(1e-12));
-        let db_avg_power = 10.0 * f32::log10(analysis.avg_power.max(1e-12));
-
-        let power_ctx = PowerCtx::new(analysis.peak_bin, db_peak_power,
-                                      analysis.center_hz, Some(analysis.estimated_peak_hz),
-                                      db_noise_floor, db_avg_power, Some(snr_db));
+        let db_power_ctx = PowerCtx::new(
+            analysis.peak_bin,
+            10.0 * f32::log10(analysis.peak_power.max(1e-12)),
+            analysis.center_hz,
+            Some(analysis.estimated_peak_hz),
+            10.0 * f32::log10(analysis.noise_floor.max(1e-12)),
+            10.0 * f32::log10(analysis.avg_power.max(1e-12)),
+            Some(snr_db),
+        );
 
         let decibel_frame = SpectrumFrame::new(
-            record_ctx,
+            spectrum_ctx,
             freq_range,
             ctx.sample_rate_hz,
             ctx.fft_size,
             BinValueKind::DecibelPower,
-            power_ctx,
+            db_power_ctx,
             db_bins,
         )
-            .map_err(|e| format!("failed to build dB spectrum frame: {e}"))?;
+        .map_err(|e| format!("failed to build dB spectrum frame: {e}"))?;
 
-
-        let record_ctx = RecordCtx {
-            r#type: MessageKind::Waterfall.as_str().to_string(),
+        let waterfall_ctx = RecordCtx::new(
+            MessageKind::Waterfall,
+            edge_id.clone(),
+            source_id.clone(),
             timestamp_ms,
-            edge_id: edge_id.clone(),
-            source_id: source_id.clone(),
-        };
+        );
 
         let waterfall_msg = WaterfallMessage {
-            record_ctx,
+            record_ctx: waterfall_ctx,
             linear: linear_frame,
             decibel: decibel_frame,
         };
 
-        let edge_event = EdgeEvent::Waterfall(Box::new(waterfall_msg));
-
-        let _ = ctx.edge_tx.try_send(edge_event).ok();
+        self.try_emit(ctx.edge_tx, EdgeEvent::Waterfall(Box::new(waterfall_msg)));
 
         if let Some(hit) = detect_hit(
             ctx.hit_cfg,
@@ -196,38 +216,33 @@ impl ScannerRunner {
         ) {
             log_hit(&hit);
 
-            let record_ctx = RecordCtx {
-                r#type: MessageKind::Record.as_str().to_string(),
-                edge_id: edge_id.clone(),
-                source_id: source_id.clone(),
+            let hit_record_ctx = RecordCtx::new(
+                MessageKind::Record,
+                edge_id,
+                source_id,
                 timestamp_ms,
+            );
+
+            let hit_msg = RecordMessage {
+                record_ctx: hit_record_ctx,
+                freq_range: FreqRange::new(
+                    analysis.lower_edge_hz,
+                    analysis.upper_edge_hz,
+                    analysis.center_hz,
+                ),
+                power_ctx: PowerCtx::new(
+                    analysis.peak_bin,
+                    analysis.peak_power,
+                    analysis.center_hz,
+                    Some(analysis.estimated_peak_hz),
+                    analysis.noise_floor,
+                    analysis.avg_power,
+                    Some(snr_db),
+                ),
+                record_message_kind: RecordMessageKind::Hit,
             };
 
-            let freq_range = FreqRange{
-                center_hz: analysis.center_hz,
-                lower_edge_hz: analysis.lower_edge_hz,
-                upper_edge_hz: analysis.upper_edge_hz,
-            };
-
-            let power_ctx = PowerCtx::new(analysis.peak_bin,
-                                          analysis.peak_power,
-                                          analysis.center_hz,
-                                          Some(analysis.estimated_peak_hz),
-                                          analysis.noise_floor,
-                                          analysis.avg_power,
-                                          Some(snr_db));
-
-            let record_msg = RecordMessage {
-                record_ctx,
-                freq_range,
-                power_ctx,
-                record_message_kind : RecordMessageKind::Hit,
-            };
-
-            let edge_event = EdgeEvent::Record(record_msg);
-
-            let _ = ctx.edge_tx.try_send(edge_event).ok();
-
+            self.try_emit(ctx.edge_tx, EdgeEvent::Record(hit_msg));
             return Ok(Some(hit));
         }
 
@@ -239,7 +254,7 @@ impl ScannerRunner {
         mode_cfg: SweepModeConfig,
         edge_tx: &mpsc::Sender<EdgeEvent>,
         hit_cfg: &HitDetectorConfig,
-    ) -> Result<()> {
+    ) -> EdgeResult<()> {
         let mut planner = self.build_planner(&mode_cfg);
         let edge_id = self.active_config.edge_id.clone();
         let source_id = self.active_config.source_id.clone();
@@ -247,6 +262,10 @@ impl ScannerRunner {
         let settle = self.active_config.settle.clone();
 
         while let Some(point) = planner.pop_next() {
+            if self.shutdown_requested.load(Ordering::Relaxed) {
+                break;
+            }
+
             if !self.scanner_running.load(Ordering::Relaxed) {
                 break;
             }
@@ -263,7 +282,7 @@ impl ScannerRunner {
             ) {
                 Ok(samples) => samples,
                 Err(err) => match self.handle_capture_error(err, point.center_hz)? {
-                    Some(samples) => samples, // (won’t happen here, but keeps pattern clean)
+                    Some(samples) => samples,
                     None => continue,
                 },
             };
@@ -279,7 +298,6 @@ impl ScannerRunner {
             );
 
             let timestamp_ms = now_ms();
-
             let emit_context = EmitContext {
                 edge_id: &edge_id,
                 source_id: &source_id,
@@ -291,9 +309,7 @@ impl ScannerRunner {
 
             let maybe_hit = self.emit_messages(&analysis, timestamp_ms, &emit_context)?;
 
-            if let Some(hit) = maybe_hit
-                .filter(|_| matches!(mode_cfg.policy, SweepPolicy::PriorityHotspots))
-            {
+            if let Some(hit) = maybe_hit.filter(|_| matches!(mode_cfg.policy, SweepPolicy::PriorityHotspots)) {
                 planner.reprioritize_near(hit.peak_hz, 0.75, 1_500_000.0);
             }
         }
@@ -306,11 +322,15 @@ impl ScannerRunner {
         mode_cfg: FixedModeConfig,
         edge_tx: &mpsc::Sender<EdgeEvent>,
         hit_cfg: &HitDetectorConfig,
-    ) -> Result<()> {
+    ) -> EdgeResult<()> {
         let edge_id = self.active_config.edge_id.clone();
         let source_id = self.active_config.source_id.clone();
 
         loop {
+            if self.shutdown_requested.load(Ordering::Relaxed) {
+                break;
+            }
+
             if !self.scanner_running.load(Ordering::Relaxed) {
                 break;
             }
@@ -345,27 +365,23 @@ impl ScannerRunner {
             let timestamp_ms = now_ms();
 
             if matches!(mode_cfg.iq_capture, IqCaptureMode::Stream) {
-
-                let record_ctx = RecordCtx {
-                    r#type: MessageKind::Iq.as_str().to_string(),
-                    edge_id: edge_id.clone(),
-                    source_id: source_id.clone(),
+                let record_ctx = RecordCtx::new(
+                    MessageKind::Iq,
+                    edge_id.clone(),
+                    source_id.clone(),
                     timestamp_ms,
-                };
+                );
 
+                let bounded_len = mode_cfg.iq_chunk_samples.min(samples.len());
                 let iq_msg = IqChunkMessage::new(
                     record_ctx,
                     mode_cfg.center_hz,
                     mode_cfg.sample_rate_hz,
-                    &samples[..mode_cfg.iq_chunk_samples.min(samples.len())],
+                    &samples[..bounded_len],
                 );
 
-                let edge_event = EdgeEvent::IqChunk(iq_msg);
-                let _ = edge_tx.try_send(edge_event).ok();
-
+                self.try_emit(edge_tx, EdgeEvent::IqChunk(iq_msg));
             }
-
-
 
             let emit_ctx = EmitContext {
                 edge_id: &edge_id,
@@ -382,49 +398,46 @@ impl ScannerRunner {
         Ok(())
     }
 
-    pub fn run_edge_loop(
-        &mut self,
-        edge_tx: mpsc::Sender<EdgeEvent>,
-    ) -> Result<()> {
+    pub fn run_edge_loop(mut self, edge_tx: mpsc::Sender<EdgeEvent>) -> EdgeResult<()> {
         let hit_cfg = HitDetectorConfig::default();
-
         self.stream.activate()?;
 
         loop {
+            if self.shutdown_requested.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if self.apply_pending_config()? {
+                continue;
+            }
+
             if !self.scanner_running.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
 
-            self.apply_pending_config()?;
-
             match self.active_config.mode.clone() {
                 ScannerMode::Sweep(mode_cfg) => {
-                    self.run_sweep_mode(
-                        mode_cfg,
-                        &edge_tx,
-                        &hit_cfg,
-                    )?;
+                    self.run_sweep_mode(mode_cfg, &edge_tx, &hit_cfg)?;
                 }
                 ScannerMode::Fixed(mode_cfg) => {
-                    self.run_fixed_mode(
-                        mode_cfg,
-                        &edge_tx,
-                        &hit_cfg,
-                    )?;
+                    self.run_fixed_mode(mode_cfg, &edge_tx, &hit_cfg)?;
                 }
                 ScannerMode::Idle => {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
         }
+
+        Ok(())
     }
+
     fn handle_capture_error<T>(
         &self,
-        err: Box<dyn std::error::Error>,
+        err: EdgeError,
         center_hz: f64,
-    ) -> Result<Option<T>> {
-        if is_overflow_error(err.as_ref()) {
+    ) -> EdgeResult<Option<T>> {
+        if is_overflow_error(&err) {
             eprintln!(
                 "scanner overflow at {:.3} MHz; continuing",
                 center_hz / 1_000_000.0
@@ -447,9 +460,6 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn is_overflow_error(err: &dyn std::error::Error) -> bool {
+fn is_overflow_error(err: &EdgeError) -> bool {
     err.to_string().contains("Overflow")
 }
-
-
-
