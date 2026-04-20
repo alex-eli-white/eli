@@ -153,11 +153,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "edge-router"
-version = "0.1.0"
-
-[[package]]
-name = "eli-edge"
+name = "eli-edge-device"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -175,11 +171,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "eli-edge-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "eli-edge-router"
+version = "0.1.0"
+
+[[package]]
 name = "eli-lab"
 version = "0.1.0"
 dependencies = [
  "num-complex",
 ]
+
+[[package]]
+name = "eli-stream-hub"
+version = "0.1.0"
 
 [[package]]
 name = "eli_control"
@@ -726,10 +734,6 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
-
-[[package]]
-name = "stream-hub"
-version = "0.1.0"
 
 [[package]]
 name = "strength_reduce"

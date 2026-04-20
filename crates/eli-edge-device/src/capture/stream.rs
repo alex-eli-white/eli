@@ -13,6 +13,13 @@ impl IqSample {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ComplexSample {
+    pub i: f32,
+    pub q: f32,
+}
+
+
 pub struct RtlStream {
     device: Device,
     stream: soapysdr::RxStream<Complex32>,

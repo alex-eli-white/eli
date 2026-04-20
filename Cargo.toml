@@ -1,2 +1,2 @@
 [workspace]
-members = ["./crates/*", "crates/edge-router", "crates/stream-hub"]
+members = ["./crates/*", "crates/eli-edge-protocol"]

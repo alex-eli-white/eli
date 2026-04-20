@@ -1,3 +1,4 @@
+use crate::scanner::vanilla::IqCaptureMode;
 use super::dwell_capture::SettleStrategy;
 use super::sweep_planner::{SweepCoverage, SweepExecution, SweepPolicy};
 
@@ -23,8 +24,9 @@ pub struct FixedModeConfig {
     pub dwell_ms: u64,
     pub fft_min_samples: usize,
     pub settle: SettleStrategy,
+    pub iq_capture: IqCaptureMode,
+    pub iq_chunk_samples: usize,
 }
-
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
     pub source_id: String,

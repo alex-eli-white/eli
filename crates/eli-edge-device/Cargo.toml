@@ -1,5 +1,5 @@
 [package]
-name = "eli-edge"
+name = "eli-edge-device"
 version = "0.1.0"
 edition = "2024"
 
