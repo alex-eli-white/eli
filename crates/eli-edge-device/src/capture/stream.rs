@@ -83,7 +83,7 @@ impl RtlStream {
 
     pub fn discard_buffers(
         &mut self,
-        count: usize,
+        count: i64,
         timeout_us: i64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..count {

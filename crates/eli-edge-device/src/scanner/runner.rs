@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+
 use crate::scanner::config::*;
 use crate::scanner::dwell_capture::dwell_capture;
 use crate::scanner::fft_analysis::{analyze, AnalysisResult};
 use crate::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
 use crate::scanner::sweep_planner::{SweepPlanner, SweepPolicy};
 use crate::scanner::vanilla::{BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
-
+use tokio::sync::mpsc;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct ScannerRunner {
@@ -23,7 +23,7 @@ struct EmitContext<'a> {
     source_id: &'a str,
     sample_rate_hz: f64,
     fft_size: usize,
-    edge_tx : &'a broadcast::Sender<EdgeEvent>,
+    edge_tx : &'a mpsc::Sender<EdgeEvent>,
     hit_cfg: &'a HitDetectorConfig,
 }
 
@@ -59,7 +59,7 @@ impl ScannerRunner {
     fn build_planner(&self, mode_cfg: &SweepModeConfig) -> SweepPlanner {
         match mode_cfg.policy {
             SweepPolicy::Sequential => {
-                SweepPlanner::new_linear(mode_cfg.coverage)
+                SweepPlanner::new_linear(&mode_cfg.coverage)
             }
             SweepPolicy::PriorityHotspots => {
                 let hotspot_pairs: Vec<(f64, f32)> = mode_cfg
@@ -68,13 +68,13 @@ impl ScannerRunner {
                     .map(|h| (h.center_hz, h.weight))
                     .collect();
 
-                SweepPlanner::new_priority(mode_cfg.coverage, &hotspot_pairs)
+                SweepPlanner::new_priority(&mode_cfg.coverage, &hotspot_pairs)
             }
             SweepPolicy::Randomized => {
-                SweepPlanner::new_randomized(mode_cfg.coverage)
+                SweepPlanner::new_randomized(&mode_cfg.coverage)
             }
             SweepPolicy::WeightedHotspots => {
-                SweepPlanner::new_weighted(mode_cfg.coverage, &mode_cfg.hotspots)
+                SweepPlanner::new_weighted(&mode_cfg.coverage, &mode_cfg.hotspots)
             }
         }
     }
@@ -118,7 +118,7 @@ impl ScannerRunner {
 
         let edge_event = EdgeEvent::Record(record_msg);
 
-        let _ = ctx.edge_tx.send(edge_event);
+        let _ = ctx.edge_tx.try_send(edge_event).ok();
 
 
         let freq_range = FreqRange{
@@ -185,7 +185,7 @@ impl ScannerRunner {
 
         let edge_event = EdgeEvent::Waterfall(Box::new(waterfall_msg));
 
-        let _ = ctx.edge_tx.send(edge_event);
+        let _ = ctx.edge_tx.try_send(edge_event).ok();
 
         if let Some(hit) = detect_hit(
             ctx.hit_cfg,
@@ -226,7 +226,7 @@ impl ScannerRunner {
 
             let edge_event = EdgeEvent::Record(record_msg);
 
-            let _ = ctx.edge_tx.send(edge_event);
+            let _ = ctx.edge_tx.try_send(edge_event).ok();
 
             return Ok(Some(hit));
         }
@@ -237,14 +237,14 @@ impl ScannerRunner {
     fn run_sweep_mode(
         &mut self,
         mode_cfg: SweepModeConfig,
-        edge_tx: &broadcast::Sender<EdgeEvent>,
+        edge_tx: &mpsc::Sender<EdgeEvent>,
         hit_cfg: &HitDetectorConfig,
     ) -> Result<()> {
         let mut planner = self.build_planner(&mode_cfg);
         let edge_id = self.active_config.edge_id.clone();
         let source_id = self.active_config.source_id.clone();
         let sample_rate_hz = self.active_config.sample_rate_hz;
-        let settle = self.active_config.settle;
+        let settle = self.active_config.settle.clone();
 
         while let Some(point) = planner.pop_next() {
             if !self.scanner_running.load(Ordering::Relaxed) {
@@ -259,7 +259,7 @@ impl ScannerRunner {
                 &mut self.stream,
                 point.center_hz,
                 mode_cfg.execution.dwell_ms,
-                settle,
+                &settle,
             ) {
                 Ok(samples) => samples,
                 Err(err) => match self.handle_capture_error(err, point.center_hz)? {
@@ -304,7 +304,7 @@ impl ScannerRunner {
     fn run_fixed_mode(
         &mut self,
         mode_cfg: FixedModeConfig,
-        edge_tx: &broadcast::Sender<EdgeEvent>,
+        edge_tx: &mpsc::Sender<EdgeEvent>,
         hit_cfg: &HitDetectorConfig,
     ) -> Result<()> {
         let edge_id = self.active_config.edge_id.clone();
@@ -323,7 +323,7 @@ impl ScannerRunner {
                 &mut self.stream,
                 mode_cfg.center_hz,
                 mode_cfg.dwell_ms,
-                mode_cfg.settle,
+                &mode_cfg.settle,
             ) {
                 Ok(samples) => samples,
                 Err(err) => match self.handle_capture_error(err, mode_cfg.center_hz)? {
@@ -361,7 +361,7 @@ impl ScannerRunner {
                 );
 
                 let edge_event = EdgeEvent::IqChunk(iq_msg);
-                let _ = edge_tx.send(edge_event);
+                let _ = edge_tx.try_send(edge_event).ok();
 
             }
 
@@ -382,9 +382,9 @@ impl ScannerRunner {
         Ok(())
     }
 
-    pub fn run_scan_loop(
+    pub fn run_edge_loop(
         &mut self,
-        edge_tx: broadcast::Sender<EdgeEvent>,
+        edge_tx: mpsc::Sender<EdgeEvent>,
     ) -> Result<()> {
         let hit_cfg = HitDetectorConfig::default();
 
@@ -412,6 +412,9 @@ impl ScannerRunner {
                         &edge_tx,
                         &hit_cfg,
                     )?;
+                }
+                ScannerMode::Idle => {
+                    std::thread::sleep(Duration::from_millis(100));
                 }
             }
         }

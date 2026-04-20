@@ -77,12 +77,31 @@ pub fn open_first_rtlsdr() -> Result<Device, Box<dyn std::error::Error>> {
 fn turn_args_hashmap(args: &Args) -> HashMap<String, String> {
     let mut outmap = HashMap::new();
 
-    for arg in args.iter() {
-        let key = arg.0.to_string();
-        let value = arg.1.to_string();
+    for (key, value) in args.iter() {
+        let key = key.to_string();
+        let value = value.to_string();
 
         outmap.insert(key, value);
     }
 
     outmap
+}
+
+
+pub fn open_rtlsdr_by_index(index: usize) -> Result<Device, Box<dyn std::error::Error>> {
+    let devices = discover_rtlsdr_devices()?;
+
+    let info = devices
+        .get(index)
+        .ok_or_else(|| format!("no RTL-SDR device at index {}", index))?;
+
+    let mut args = soapysdr::Args::new();
+    args.set("driver", "rtlsdr");
+
+    if let Some(serial) = &info.serial {
+        args.set("serial", String::from(serial));
+    }
+
+    let dev = soapysdr::Device::new(args)?;
+    Ok(dev)
 }

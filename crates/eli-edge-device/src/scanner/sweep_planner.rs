@@ -1,7 +1,8 @@
 use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
 use crate::scanner::config::HotspotConfig;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepPoint {
     pub center_hz: f64,
     pub lower_edge_hz: f64,
@@ -9,7 +10,7 @@ pub struct SweepPoint {
     pub priority: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepCoverage {
     pub start_hz: f64,
     pub end_hz: f64,
@@ -24,7 +25,7 @@ impl SweepCoverage {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SweepPolicy {
     Sequential,
     PriorityHotspots,
@@ -34,21 +35,21 @@ pub enum SweepPolicy {
 
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepExecution {
     pub dwell_ms: u64,
     pub settle_ms: u64,
     pub flush_count: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepPlanner {
     points: Vec<SweepPoint>,
     usable_bandwidth_hz: f64,
 }
 
 impl SweepPlanner {
-    pub fn new_linear(config: SweepCoverage) -> Self {
+    pub fn new_linear(config: &SweepCoverage) -> Self {
         let mut points = Vec::new();
         let step_hz = config.step_hz();
         let half_span_hz = config.sample_rate_hz / 2.0;
@@ -70,7 +71,7 @@ impl SweepPlanner {
         }
     }
 
-    pub fn new_priority(config: SweepCoverage, hotspots: &[(f64, f32)]) -> Self {
+    pub fn new_priority(config: &SweepCoverage, hotspots: &[(f64, f32)]) -> Self {
         let mut planner = Self::new_linear(config);
         let usable_bandwidth_hz = planner.usable_bandwidth_hz;
 
@@ -88,7 +89,7 @@ impl SweepPlanner {
         planner
     }
 
-    pub fn new_randomized(config: SweepCoverage) -> Self {
+    pub fn new_randomized(config: &SweepCoverage) -> Self {
         let mut planner = Self::new_linear(config);
         let mut rng = rand::rngs::ThreadRng::default();
         planner.points.shuffle(&mut rng);
@@ -120,10 +121,10 @@ impl SweepPlanner {
     }
 
     pub fn new_weighted(
-        config: SweepCoverage,
+        config: &SweepCoverage,
         hotspots: &[HotspotConfig],
     ) -> Self {
-        let mut planner = Self::new_linear(config.clone());
+        let mut planner = Self::new_linear(config);
 
         let mut extra_points = Vec::new();
 

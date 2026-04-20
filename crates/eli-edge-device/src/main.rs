@@ -1,262 +1,118 @@
-use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
-use serde::Serialize;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use clap::Parser;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 
-use tower_http::cors::{Any, CorsLayer};
-use axum::http::{Method, HeaderValue};
+use eli_edge_device::capture::discovery::open_rtlsdr_by_index;
+use eli_edge_device::capture::stream::RtlStream;
+use eli_edge_device::scanner::config::ScannerConfig;
+use eli_edge_device::scanner::runner::ScannerRunner;
+use eli_edge_device::scanner::vanilla::EdgeEvent;
+use serde::{Deserialize, Serialize};
 
-use eli_edge::capture::discovery::{discover_rtlsdr_devices, open_first_rtlsdr};
-use eli_edge::capture::stream::RtlStream;
-use eli_edge::scanner::dwell_capture::{dwell_capture, SettleStrategy};
-use eli_edge::scanner::fft_analysis::analyze;
-use eli_edge::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
-use eli_edge::scanner::sweep_planner::{SweepPlanner, SweepCoverage};
-use eli_edge::scanner::vanilla::SweepRecord;
+#[derive(Debug, Parser)]
+struct EdgeDeviceArgs {
+    #[arg(long)]
+    worker_id: String,
 
-#[derive(Clone)]
-struct AppState {
-    record_tx: broadcast::Sender<RecordMessage>,
-    hit_tx: broadcast::Sender<HitMessage>,
-    waterfall_tx: broadcast::Sender<WaterfallMessage>,
-    scanner_running: Arc<AtomicBool>,
+    #[arg(long)]
+    socket_path: String,
+
+    #[arg(long)]
+    device_index: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct RecordMessage {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    source_id: String,
-    timestamp_ms: u64,
-    center_hz: f64,
-    lower_edge_hz: f64,
-    upper_edge_hz: f64,
-    avg_power: f32,
-    noise_floor: f32,
-    peak_power: f32,
-    peak_bin: usize,
-    estimated_peak_hz: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HitMessage {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    source_id: String,
-    timestamp_ms: u64,
-    center_hz: f64,
-    peak_hz: f64,
-    lower_edge_hz: f64,
-    upper_edge_hz: f64,
-    peak_bin: usize,
-    peak_power: f32,
-    noise_floor: f32,
-    avg_power: f32,
-    snr_db: f32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WaterfallMessage {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    source_id: String,
-    timestamp_ms: u64,
-    center_hz: f64,
-    lower_edge_hz: f64,
-    upper_edge_hz: f64,
-    bins: Vec<f32>,
-}
-
-#[derive(Debug, Serialize)]
-struct ScannerStatus {
-    is_running: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EdgeCommand {
+    SetConfig(ScannerConfig),
+    Start,
+    Stop,
+    Ping,
+    Shutdown,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let devices = discover_rtlsdr_devices()?;
+    let args = EdgeDeviceArgs::parse();
 
-    if devices.is_empty() {
-        println!("No RTL-SDR devices found");
-        return Ok(());
-    }
+    let stream = UnixStream::connect(&args.socket_path).await?;
+    let (read_half, mut write_half) = stream.into_split();
 
-    println!("Found {} RTL-SDR device(s)\n", devices.len());
+    let scanner_running = Arc::new(AtomicBool::new(false));
 
-    for (idx, dev) in devices.iter().enumerate() {
-        println!("Device {idx}:");
-        println!("  driver: {}", dev.driver);
-        println!("  label: {:?}", dev.label);
-        println!("  manufacturer: {:?}", dev.manufacturer);
-        println!("  product: {:?}", dev.product);
-        println!("  serial: {:?}", dev.serial);
-        println!("  tuner: {:?}", dev.tuner);
-        println!("  rx_channels: {}", dev.rx_channels);
-        println!("  current_sample_rate: {:?}", dev.current_sample_rate);
-        println!("  frequency_ranges: {:?}", dev.frequency_ranges);
-        println!();
-    }
+    let dev = open_rtlsdr_by_index(args.device_index)?;
+    let initial_center_hz = 96_300_000.0;
+    let initial_sample_rate_hz = 2_048_000.0;
+    let rtl_stream = RtlStream::open(dev, initial_center_hz, initial_sample_rate_hz)?;
 
-    let (record_tx, _) = broadcast::channel::<RecordMessage>(256);
-    let (hit_tx, _) = broadcast::channel::<HitMessage>(256);
-    let (waterfall_tx, _) = broadcast::channel::<WaterfallMessage>(64);
+    let initial_config = ScannerConfig::default_for_worker(args.worker_id.clone());
 
-    let scanner_running = Arc::new(AtomicBool::new(true));
+    let runner = Arc::new(Mutex::new(ScannerRunner::new(
+        rtl_stream,
+        initial_config,
+        scanner_running.clone(),
+    )));
 
-    let state = AppState {
-        record_tx: record_tx.clone(),
-        hit_tx: hit_tx.clone(),
-        waterfall_tx: waterfall_tx.clone(),
-        scanner_running: scanner_running.clone(),
-    };
+    let (event_tx, mut event_rx) = mpsc::channel::<EdgeEvent>(256);
 
-    println!("about to build app");
-
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST])
-        .allow_headers(Any);
-
-    let app = Router::new()
-        .route("/ws/records", get(ws_records_handler))
-        .route("/ws/hits", get(ws_hits_handler))
-        .route("/ws/waterfall", get(ws_waterfall_handler))
-        .route("/api/scanner/status", get(scanner_status_handler))
-        .route("/api/scanner/start", post(scanner_start_handler))
-        .route("/api/scanner/stop", post(scanner_stop_handler))
-        .route("/healthz", get(|| async { "ok" }))
-        .layer(cors)
-        .with_state(state);
-
-    let addr: SocketAddr = "0.0.0.0:9001".parse()?;
-
-    println!("about to bind listener on {addr}");
-    let listener = TcpListener::bind(addr).await?;
-    println!("listener bound successfully");
-
-    println!("about to spawn scanner thread");
-    tokio::task::spawn_blocking(move || {
-        println!("scanner thread entered");
-        if let Err(err) = run_scan_loop(record_tx, hit_tx, waterfall_tx, scanner_running) {
-            eprintln!("scanner loop exited with error: {err}");
+    // writer task: send edge events to router
+    let writer_task = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            let line = serde_json::to_string(&event)?;
+            write_half.write_all(line.as_bytes()).await?;
+            write_half.write_all(b"\n").await?;
         }
-        println!("scanner thread exited");
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
 
-    println!("about to serve axum");
-    axum::serve(listener, app).await?;
-    println!("axum serve returned unexpectedly");
-    Ok(())
-}
+    // command reader task
+    let runner_for_cmd = runner.clone();
+    let scanner_running_for_cmd = scanner_running.clone();
+    let command_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(read_half).lines();
 
+        while let Some(line) = lines.next_line().await? {
+            let cmd: EdgeCommand = serde_json::from_str(&line)?;
 
-async fn scanner_status_handler(State(state): State<AppState>) -> Json<ScannerStatus> {
-    Json(ScannerStatus {
-        is_running: state.scanner_running.load(Ordering::Relaxed),
-    })
-}
-
-async fn scanner_start_handler(State(state): State<AppState>) -> impl IntoResponse {
-    state.scanner_running.store(true, Ordering::Relaxed);
-    (StatusCode::OK, Json(ScannerStatus { is_running: true }))
-}
-
-async fn scanner_stop_handler(State(state): State<AppState>) -> impl IntoResponse {
-    state.scanner_running.store(false, Ordering::Relaxed);
-    (StatusCode::OK, Json(ScannerStatus { is_running: false }))
-}
-
-async fn ws_records_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| records_socket(socket, state))
-}
-
-async fn ws_hits_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| hits_socket(socket, state))
-}
-
-async fn ws_waterfall_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| waterfall_socket(socket, state))
-}
-
-async fn records_socket(socket: WebSocket, state: AppState) {
-    println!("records websocket client connected");
-    let mut rx = state.record_tx.subscribe();
-    forward_broadcast_to_ws(socket, &mut rx).await;
-    println!("records websocket client disconnected");
-}
-
-async fn hits_socket(socket: WebSocket, state: AppState) {
-    println!("hits websocket client connected");
-    let mut rx = state.hit_tx.subscribe();
-    forward_broadcast_to_ws(socket, &mut rx).await;
-    println!("hits websocket client disconnected");
-}
-
-async fn waterfall_socket(socket: WebSocket, state: AppState) {
-    println!("waterfall websocket client connected");
-    let mut rx = state.waterfall_tx.subscribe();
-    forward_broadcast_to_ws(socket, &mut rx).await;
-    println!("waterfall websocket client disconnected");
-}
-
-async fn forward_broadcast_to_ws<T>(
-    mut socket: WebSocket,
-    rx: &mut broadcast::Receiver<T>,
-) where
-    T: Serialize + Clone,
-{
-    loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                match serde_json::to_string(&msg) {
-                    Ok(text) => {
-                        if socket.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("failed to serialize websocket message: {err}");
-                    }
+            match cmd {
+                EdgeCommand::SetConfig(cfg) => {
+                    let mut runner = runner_for_cmd.lock().unwrap();
+                    runner.pending_config = Some(cfg);
+                }
+                EdgeCommand::Start => {
+                    scanner_running_for_cmd.store(true, Ordering::Relaxed);
+                }
+                EdgeCommand::Stop => {
+                    scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                }
+                EdgeCommand::Ping => {
+                    // later: emit a Status/Pong event
+                }
+                EdgeCommand::Shutdown => {
+                    scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                    break;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                eprintln!("websocket client lagged, skipped {skipped} messages");
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
         }
-    }
-}
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
 
-fn log_hit(hit: &Hit) {
-    println!(
-        "HIT center={:.3} MHz peak={:.3} MHz snr={:.2} dB peak={:.3} floor={:.3}",
-        hit.center_hz / 1e6,
-        hit.peak_hz / 1e6,
-        hit.snr_db,
-        hit.peak_power,
-        hit.noise_floor,
-    );
+    // scanner task
+    let runner_for_scan = runner.clone();
+    let scanner_task = tokio::task::spawn_blocking(move || {
+        let mut runner = runner_for_scan.lock().unwrap();
+        runner.run_edge_loop(event_tx);
+    });
+
+    let _ = tokio::try_join!(writer_task, command_task)?;
+    let _ = scanner_task.await?;
+
+    Ok(())
 }
