@@ -4,16 +4,19 @@ use std::sync::{
 };
 
 use clap::Parser;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use eli_edge_device::capture::discovery::open_rtlsdr_by_index;
 use eli_edge_device::capture::stream::RtlStream;
-use eli_edge_device::scanner::edge_error::EdgeError;
 use eli_edge_device::scanner::runner::ScannerRunner;
+
 use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent, StatusMessage};
+
+use eli_edge_device::edge_error::EdgeError;
 
 #[derive(Debug, Parser)]
 struct EdgeDeviceArgs {

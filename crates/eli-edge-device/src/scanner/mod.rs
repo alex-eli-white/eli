@@ -1,7 +1,5 @@
-pub type EdgeResult<T> = Result<T, edge_error::EdgeError>;
+//MODS
 pub mod fft_analysis;
-
-pub mod edge_error;
 pub mod dwell_capture;
 pub mod sweep_planner;
 

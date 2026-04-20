@@ -1,6 +1,6 @@
 use num_complex::Complex32;
 use soapysdr::{Device, Direction};
-use crate::scanner::EdgeResult;
+use crate::EdgeResult;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IqSample {

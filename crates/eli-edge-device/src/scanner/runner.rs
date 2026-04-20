@@ -3,22 +3,24 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use tokio::sync::mpsc;
-
-
 
 use eli_protocol::edge_vanilla::scanner::config_vanilla::{FixedModeConfig, Hit, HitDetectorConfig, ScannerConfig, ScannerMode, SweepModeConfig};
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{AnalysisResult, BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
 use eli_protocol::edge_vanilla::scanner::sweep_vanilla::SweepPolicy;
+
+
 use crate::scanner::dwell_capture::dwell_capture;
-use crate::scanner::edge_error::EdgeError;
-use crate::scanner::EdgeResult;
 use crate::scanner::fft_analysis::analyze;
 use crate::scanner::hit_detection::detect_hit;
 use crate::scanner::sweep_planner::SweepPlanner;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+use crate::edge_error::EdgeError;
+use crate::{EdgeResult, HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, HZ_PER_MHZ, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
+use crate::helpers::dc_dcb::power_to_db;
+
+
 
 pub struct ScannerRunner {
     pub stream: crate::capture::stream::RtlStream,
@@ -85,7 +87,7 @@ impl ScannerRunner {
 
     fn linear_to_db_bins(bins: &[f32]) -> Vec<f32> {
         bins.iter()
-            .map(|v| 10.0 * f32::log10(v.max(1e-12)))
+            .map(|v| 10.0 * f32::log10(v.max(POWER_EPSILON)))
             .collect()
     }
 
@@ -117,8 +119,10 @@ impl ScannerRunner {
         let edge_id = ctx.edge_id.to_string();
         let source_id = ctx.source_id.to_string();
 
-        let snr_db =
-            10.0 * f32::log10((analysis.peak_power / analysis.noise_floor.max(1e-12)).max(1e-12));
+        let snr_db = power_to_db(
+            (analysis.peak_power / analysis.noise_floor.max(POWER_EPSILON))
+                .max(POWER_EPSILON),
+        );
 
         let record_ctx = RecordCtx::new(
             MessageKind::Record,
@@ -173,11 +177,11 @@ impl ScannerRunner {
         let db_bins = Self::linear_to_db_bins(&analysis.spectrum);
         let db_power_ctx = PowerCtx::new(
             analysis.peak_bin,
-            10.0 * f32::log10(analysis.peak_power.max(1e-12)),
+            power_to_db(analysis.peak_power.max(POWER_EPSILON)),
             analysis.center_hz,
             Some(analysis.estimated_peak_hz),
-            10.0 * f32::log10(analysis.noise_floor.max(1e-12)),
-            10.0 * f32::log10(analysis.avg_power.max(1e-12)),
+            power_to_db(analysis.noise_floor),
+            power_to_db(analysis.avg_power),
             Some(snr_db),
         );
 
@@ -310,7 +314,7 @@ impl ScannerRunner {
             let maybe_hit = self.emit_messages(&analysis, timestamp_ms, &emit_context)?;
 
             if let Some(hit) = maybe_hit.filter(|_| matches!(mode_cfg.policy, SweepPolicy::PriorityHotspots)) {
-                planner.reprioritize_near(hit.peak_hz, 0.75, 1_500_000.0);
+                planner.reprioritize_near(hit.peak_hz, HOTSPOT_REPRIORITIZE_WEIGHT, HOTSPOT_REPRIORITIZE_RADIUS_HZ);
             }
         }
 
@@ -412,7 +416,7 @@ impl ScannerRunner {
             }
 
             if !self.scanner_running.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(SCANNER_SLEEP_TIME_MS));
                 continue;
             }
 
@@ -424,7 +428,7 @@ impl ScannerRunner {
                     self.run_fixed_mode(mode_cfg, &edge_tx, &hit_cfg)?;
                 }
                 ScannerMode::Idle => {
-                    std::thread::sleep(Duration::from_millis(100));
+                    std::thread::sleep(Duration::from_millis(SCANNER_SLEEP_TIME_MS));
                 }
             }
         }
@@ -440,7 +444,7 @@ impl ScannerRunner {
         if is_overflow_error(&err) {
             eprintln!(
                 "scanner overflow at {:.3} MHz; continuing",
-                center_hz / 1_000_000.0
+                center_hz / HZ_PER_MHZ
             );
             return Ok(None);
         }

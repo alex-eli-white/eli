@@ -1,6 +1,6 @@
 use num_complex::Complex32;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::AnalysisResult;
-use crate::helpers::{dc::remove_dc, fft::compute_fft};
+use crate::helpers::{dc_dcb::remove_dc, fft::compute_fft};
 
 pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> AnalysisResult {
     let centered = remove_dc(samples);

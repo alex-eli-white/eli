@@ -1,10 +1,10 @@
 use eli_protocol::edge_vanilla::scanner::config_vanilla::{Hit, HitDetectorConfig};
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::AnalysisResult;
-
+use crate::POWER_EPSILON;
 
 pub fn estimate_snr_db(peak_power: f32, noise_floor: f32) -> f32 {
-    let floor = noise_floor.max(1e-12);
-    let ratio = (peak_power / floor).max(1e-12);
+    let floor = noise_floor.max(POWER_EPSILON);
+    let ratio = (peak_power / floor).max(POWER_EPSILON);
     10.0 * ratio.log10()
 }
 

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Debug};
 
 use soapysdr::{Args, Device, Direction};
-use crate::scanner::EdgeResult;
+use crate::EdgeResult;
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredDevice {

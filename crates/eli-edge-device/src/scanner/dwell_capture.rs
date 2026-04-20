@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
 use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
 use crate::capture::stream::RtlStream;
-use crate::scanner::EdgeResult;
+use crate::EdgeResult;
 
 pub fn dwell_capture(
     stream: &mut RtlStream,
