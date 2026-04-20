@@ -8,6 +8,8 @@ pub enum MessageKind {
     Hit,
     Waterfall,
     Iq,
+    Spectrum,
+    Status,
 }
 
 impl MessageKind {
@@ -17,6 +19,9 @@ impl MessageKind {
             MessageKind::Hit => "hit",
             MessageKind::Waterfall => "waterfall_frame",
             MessageKind::Iq => "iq_chunk",
+            MessageKind::Spectrum => "spectrum_frame",
+            MessageKind::Status => "status",
+
         }
     }
 }
@@ -24,26 +29,36 @@ impl MessageKind {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeakFinder {
+pub struct PowerCtx {
     pub peak_bin: usize,
     pub peak_power: f32,
 
     pub bin_center_hz: f64,
     pub estimated_peak_hz: Option<f64>,
+
+    pub noise_floor: f32,
+    pub avg_power: f32,
+    pub snr_db: Option<f32>,
 }
 
-impl PeakFinder {
+impl PowerCtx {
     pub fn new(
         peak_bin: usize,
         peak_power: f32,
         bin_center_hz: f64,
         estimated_peak_hz: Option<f64>,
+        noise_floor: f32,
+        avg_power: f32,
+        snr_db: Option<f32>,
     ) -> Self {
         Self {
             peak_bin,
             peak_power,
             bin_center_hz,
             estimated_peak_hz,
+            noise_floor,
+            avg_power,
+            snr_db,
         }
     }
 
@@ -71,10 +86,10 @@ pub struct RecordCtx{
     pub timestamp_ms : u128,
 }
 
-impl RecordCtx{
-    pub fn new(r#type : String, edge_id : String, source_id : String, timestamp_ms : u128) -> Self{
-        Self{
-            r#type,
+impl RecordCtx {
+    pub fn new(kind: MessageKind, edge_id: String, source_id: String, timestamp_ms: u128) -> Self {
+        Self {
+            r#type: kind.as_str().to_string(),
             edge_id,
             source_id,
             timestamp_ms,
@@ -111,13 +126,10 @@ pub struct RecordMessage {
 
     pub freq_range: FreqRange,
 
-    pub peak : PeakFinder,
+    pub power_ctx: PowerCtx,
 
     pub record_message_kind: RecordMessageKind,
 
-    pub noise_floor: f32,
-    pub avg_power: f32,
-    pub snr_db: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,15 +146,12 @@ pub struct SpectrumFrame {
 
     pub value_kind: BinValueKind,
 
-    pub peak : PeakFinder,
+    pub power_ctx: PowerCtx,
 
     pub bin_width_hz: f64,
 
     pub sample_rate_hz: f64,
     pub fft_size: usize,
-
-    pub noise_floor: f32,
-    pub avg_power: f32,
 
     pub bins: Vec<f32>,
 }
@@ -150,24 +159,14 @@ pub struct SpectrumFrame {
 
 impl SpectrumFrame {
     pub fn new(
-        timestamp_ms: u128,
-        edge_id: String,
-        source_id: String,
-        center_hz: f64,
-        lower_edge_hz: f64,
-        upper_edge_hz: f64,
+        record_ctx: RecordCtx,
+        freq_range: FreqRange,
         sample_rate_hz: f64,
         fft_size: usize,
         value_kind: BinValueKind,
-        peak_bin: usize,
-        peak_power: f32,
-        noise_floor: f32,
-        avg_power: f32,
+        power_ctx: PowerCtx,
         bins: Vec<f32>,
     ) -> Result<Self, String> {
-
-        let record_ctx = RecordCtx::new("spectrum_frame".to_string(), edge_id, source_id, timestamp_ms);
-
         if bins.len() != fft_size {
             return Err(format!("bins len {} != fft_size {}", bins.len(), fft_size));
         }
@@ -176,29 +175,29 @@ impl SpectrumFrame {
             return Err("fft_size must be > 0".to_string());
         }
 
-        if !(upper_edge_hz > lower_edge_hz) {
+        if freq_range.upper_edge_hz <= freq_range.lower_edge_hz {
             return Err("upper_edge_hz must be > lower_edge_hz".to_string());
         }
 
-        if peak_bin >= bins.len() {
-            return Err(format!("peak_bin {} out of range {}", peak_bin, bins.len()));
+        if power_ctx.peak_bin >= bins.len() {
+            return Err(format!(
+                "peak_bin {} out of range {}",
+                power_ctx.peak_bin,
+                bins.len()
+            ));
         }
 
-        let bin_width_hz = (upper_edge_hz - lower_edge_hz) / fft_size as f64;
-        let peak_hz = lower_edge_hz + (peak_bin as f64 * bin_width_hz);
-        let peak = PeakFinder::new(peak_bin,peak_power,  peak_hz);
-        let freq_range = FreqRange::new(lower_edge_hz, upper_edge_hz, center_hz);
+        let bin_width_hz =
+            (freq_range.upper_edge_hz - freq_range.lower_edge_hz) / fft_size as f64;
 
         Ok(Self {
             record_ctx,
             freq_range,
+            value_kind,
+            power_ctx,
             bin_width_hz,
             sample_rate_hz,
             fft_size,
-            value_kind,
-            peak,
-            noise_floor,
-            avg_power,
             bins,
         })
     }
@@ -212,12 +211,6 @@ impl SpectrumFrame {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IqChunkMessage {
-    // pub r#type: String,
-    //
-    // pub edge_id: String,
-    // pub source_id: String,
-    // pub timestamp_ms: u128,
-
     pub record_ctx: RecordCtx,
 
     pub center_hz: f64,
@@ -235,14 +228,14 @@ impl IqChunkMessage {
         record_ctx: RecordCtx,
         center_hz: f64,
         sample_rate_hz: f64,
-        samples: &[Complex32]
-    )->Self{
-        Self{
+        samples: &[Complex32],
+    ) -> Self {
+        Self {
             record_ctx,
             center_hz,
             sample_rate_hz,
             sample_format: IqSampleFormat::ComplexF32,
-            sample_count: samples.len() as u32 as usize,
+            sample_count: samples.len(),
             samples_i: samples.iter().map(|s| s.re).collect(),
             samples_q: samples.iter().map(|s| s.im).collect(),
         }
@@ -267,13 +260,15 @@ pub enum IqSampleFormat {
     ComplexF32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IqCaptureMode {
     Off,
     Stream,
     Snapshot,
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeEvent {
     Status(StatusMessage),
     Record(RecordMessage),

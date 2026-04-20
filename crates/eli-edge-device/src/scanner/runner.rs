@@ -7,7 +7,7 @@ use crate::scanner::dwell_capture::dwell_capture;
 use crate::scanner::fft_analysis::{analyze, AnalysisResult};
 use crate::scanner::hit_detection::{detect_hit, Hit, HitDetectorConfig};
 use crate::scanner::sweep_planner::{SweepPlanner, SweepPolicy};
-use crate::scanner::vanilla::{BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PeakFinder, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
+use crate::scanner::vanilla::{BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -107,16 +107,13 @@ impl ScannerRunner {
             upper_edge_hz: analysis.upper_edge_hz,
         };
 
-        let peak = PeakFinder::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz));
+        let power_ctx = PowerCtx::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz), analysis.noise_floor, analysis.avg_power, Some(snr_db));
 
         let record_msg = RecordMessage {
-            record_ctx,
+            record_ctx:record_ctx.clone(),
             freq_range,
-            peak,
-            noise_floor: analysis.noise_floor,
-            avg_power: analysis.avg_power,
+            power_ctx,
             record_message_kind : RecordMessageKind::General,
-            snr_db,
         };
 
         let edge_event = EdgeEvent::Record(record_msg);
@@ -124,20 +121,29 @@ impl ScannerRunner {
         let _ = ctx.edge_tx.send(edge_event);
 
 
-        let linear_frame = SpectrumFrame::new(
+        let freq_range = FreqRange{
+            center_hz: analysis.center_hz,
+            lower_edge_hz: analysis.lower_edge_hz,
+            upper_edge_hz: analysis.upper_edge_hz,
+        };
+
+        let power_ctx = PowerCtx::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz), analysis.noise_floor, analysis.avg_power, Some(snr_db));
+
+
+        let record_ctx = RecordCtx {
+            r#type: MessageKind::Spectrum.as_str().to_string(),
+            edge_id: edge_id.clone(),
+            source_id: source_id.clone(),
             timestamp_ms,
-            edge_id.clone(),
-            source_id.clone(),
-            analysis.center_hz,
-            analysis.lower_edge_hz,
-            analysis.upper_edge_hz,
+        };
+
+        let linear_frame = SpectrumFrame::new(
+            record_ctx.clone(),
+            freq_range.clone(),
             ctx.sample_rate_hz,
             ctx.fft_size,
             BinValueKind::LinearPower,
-            analysis.peak_bin,
-            analysis.peak_power,
-            analysis.noise_floor,
-            analysis.avg_power,
+            power_ctx,
             analysis.spectrum.clone(),
         )
             .map_err(|e| format!("failed to build linear spectrum frame: {e}"))?;
@@ -148,20 +154,17 @@ impl ScannerRunner {
         let db_noise_floor = 10.0 * f32::log10(analysis.noise_floor.max(1e-12));
         let db_avg_power = 10.0 * f32::log10(analysis.avg_power.max(1e-12));
 
+        let power_ctx = PowerCtx::new(analysis.peak_bin, db_peak_power,
+                                      analysis.center_hz, Some(analysis.estimated_peak_hz),
+                                      db_noise_floor, db_avg_power, Some(snr_db));
+
         let decibel_frame = SpectrumFrame::new(
-            timestamp_ms,
-            edge_id.clone(),
-            source_id.clone(),
-            analysis.center_hz,
-            analysis.lower_edge_hz,
-            analysis.upper_edge_hz,
+            record_ctx,
+            freq_range,
             ctx.sample_rate_hz,
             ctx.fft_size,
             BinValueKind::DecibelPower,
-            analysis.peak_bin,
-            db_peak_power,
-            db_noise_floor,
-            db_avg_power,
+            power_ctx,
             db_bins,
         )
             .map_err(|e| format!("failed to build dB spectrum frame: {e}"))?;
@@ -206,16 +209,19 @@ impl ScannerRunner {
                 upper_edge_hz: analysis.upper_edge_hz,
             };
 
-            let peak = PeakFinder::new(analysis.peak_bin, analysis.peak_power, analysis.center_hz, Some(analysis.estimated_peak_hz));
+            let power_ctx = PowerCtx::new(analysis.peak_bin,
+                                          analysis.peak_power,
+                                          analysis.center_hz,
+                                          Some(analysis.estimated_peak_hz),
+                                          analysis.noise_floor,
+                                          analysis.avg_power,
+                                          Some(snr_db));
 
             let record_msg = RecordMessage {
                 record_ctx,
                 freq_range,
-                peak,
-                noise_floor: analysis.noise_floor,
-                avg_power: analysis.avg_power,
+                power_ctx,
                 record_message_kind : RecordMessageKind::Hit,
-                snr_db,
             };
 
             let edge_event = EdgeEvent::Record(record_msg);
