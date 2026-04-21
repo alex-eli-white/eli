@@ -18,7 +18,7 @@ use crate::scanner::sweep_planner::SweepPlanner;
 use crate::edge_error::EdgeError;
 use crate::{EdgeResult, HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, HZ_PER_MHZ, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
 use crate::helpers::dc_dcb::power_to_db;
-use crate::scanner::streams::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
+use crate::scanner::stream_device::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
 
 pub struct ScannerRunner {
     pub stream: DeviceStreamWrapper,

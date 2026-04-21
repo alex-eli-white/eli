@@ -7,6 +7,6 @@ pub mod hit_detection;
 
 pub mod runner;
 
-pub mod streams;
+pub mod stream_device;
 
 pub mod args_vanilla;

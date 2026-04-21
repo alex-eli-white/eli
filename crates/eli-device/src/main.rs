@@ -13,8 +13,8 @@ use eli_device::scanner::args_vanilla::{DeviceKindArg, EdgeDeviceArgs};
 use eli_device::edge_error::EdgeError;
 use eli_device::scanner::args_vanilla::DeviceKindArg::BladeRf;
 use eli_device::scanner::runner::ScannerRunner;
-use eli_device::scanner::streams::rtl::RtlDevice;
-use eli_device::scanner::streams::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
+use eli_device::scanner::stream_device::rtl::RtlDevice;
+use eli_device::scanner::stream_device::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
 use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent, StatusMessage};
 
@@ -38,13 +38,14 @@ async fn main() -> Result<(), EdgeError> {
     )));
 
 
-    let edge_device: Arc<Box<dyn DeviceStream>> = match args.device_kind {
+    let edge_device: Box<dyn DeviceStream> = match args.device_kind {
         DeviceKindArg::Rtl => {
-            Arc::new(Box::new(RtlDevice::new(&args.serial_number)?))
+            Box::new(RtlDevice::new(&args.serial_number)?)
         }
         _ => panic!("Unsupported device kind: {:?}", args.device_kind),
     };
     let wrapper = DeviceStreamWrapper(edge_device);
+    
     let runner = ScannerRunner::new(
         wrapper,
         initial_config.clone(),

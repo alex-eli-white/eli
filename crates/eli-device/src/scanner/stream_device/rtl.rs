@@ -1,23 +1,19 @@
-use std::sync::Arc;
 use num_complex::Complex32;
 use soapysdr::{Device, Direction};
 use soapysdr_sys::SoapySDRRange;
-use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
-use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
-use crate::capture::stream::{IqSample};
+
 use crate::edge_error::EdgeError;
 use crate::EdgeResult;
-use crate::scanner::dwell_capture::{dwell_capture};
-use crate::scanner::streams::stream_vanilla::DeviceStream;
+use crate::scanner::stream_device::stream_vanilla::DeviceStream;
 
 
 
 pub struct RtlDevice {
-    device: Device,
-    stream: soapysdr::RxStream<IqSample>,
-    scratch: Vec<IqSample>,
-    current_sample_rate: Option<f64>,
-    frequency_ranges: Vec<SoapySDRRange>,
+    pub device: Device,
+    pub stream: soapysdr::RxStream<Complex32>,
+    pub scratch: Vec<Complex32>,
+    pub current_sample_rate: Option<f64>,
+    pub frequency_ranges: Vec<SoapySDRRange>,
 }
 
 impl RtlDevice {
@@ -64,7 +60,7 @@ pub fn get_rtlsdr_devices(serial_number: &str) -> EdgeResult<Vec<RtlDevice>> {
             stream: rx,
             current_sample_rate,
             frequency_ranges,
-            scratch: vec![IqSample::new(0.0, 0.0); 1024],
+            scratch: vec![Complex32::new(0.0, 0.0); 1024],
         });
     }
 
@@ -94,7 +90,7 @@ impl DeviceStream for RtlDevice {
         let mut out = Vec::with_capacity(count);
 
         for sample in &self.scratch[..count] {
-            out.push(sample.to_complex());
+            out.push(*sample);
         }
 
         Ok(out)
