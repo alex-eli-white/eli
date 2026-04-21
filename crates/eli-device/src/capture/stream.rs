@@ -1,8 +1,9 @@
 use num_complex::Complex32;
-use soapysdr::{Device, Direction};
+use soapysdr::{Device, Direction, Format, StreamSample};
 use crate::EdgeResult;
 
-#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IqSample {
     pub i: f32,
     pub q: f32,
@@ -12,19 +13,20 @@ impl IqSample {
     pub fn to_complex(&self) -> Complex32 {
         Complex32::new(self.i, self.q)
     }
+    pub fn new(i: f32, q: f32) -> Self {
+        Self { i, q }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ComplexSample {
-    pub i: f32,
-    pub q: f32,
-}
 
+unsafe impl StreamSample for IqSample {
+    const STREAM_FORMAT: Format = Format::CF32;
+}
 
 pub struct RtlStream {
     device: Device,
-    stream: soapysdr::RxStream<Complex32>,
-    scratch: Vec<Complex32>,
+    stream: soapysdr::RxStream<IqSample>,
+    scratch: Vec<IqSample>,
 }
 
 impl RtlStream {
@@ -36,12 +38,12 @@ impl RtlStream {
         device.set_sample_rate(Direction::Rx, 0, sample_rate)?;
         device.set_frequency(Direction::Rx, 0, center_hz, ())?;
 
-        let stream = device.rx_stream::<Complex32>(&[0])?;
+        let stream = device.rx_stream::<IqSample>(&[0])?;
 
         Ok(Self {
             device,
             stream,
-            scratch: vec![Complex32::new(0.0, 0.0); 16_384],
+            scratch: vec![IqSample::new(0.0, 0.0); 16_384],
         })
     }
 
@@ -70,16 +72,7 @@ impl RtlStream {
         let mut buffers = [&mut self.scratch[..]];
         let count = self.stream.read(&mut buffers, timeout_us)?;
 
-        let mut out = Vec::with_capacity(count);
-
-        for sample in &self.scratch[..count] {
-            out.push(IqSample {
-                i: sample.re,
-                q: sample.im,
-            });
-        }
-
-        Ok(out)
+        Ok(self.scratch[..count].to_vec())
     }
 
     pub fn discard_buffers(

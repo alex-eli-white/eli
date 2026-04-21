@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use num_complex::Complex32;
 use soapysdr::{Device, Direction};
+use soapysdr_sys::SoapySDRRange;
 use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
 use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
 use crate::capture::stream::{IqSample};
@@ -10,26 +12,72 @@ use crate::scanner::streams::stream_vanilla::DeviceStream;
 
 
 
-pub struct RtlStream {
+pub struct RtlDevice {
     device: Device,
-    stream: soapysdr::RxStream<Complex32>,
-    scratch: Vec<Complex32>,
+    stream: soapysdr::RxStream<IqSample>,
+    scratch: Vec<IqSample>,
+    current_sample_rate: Option<f64>,
+    frequency_ranges: Vec<SoapySDRRange>,
 }
 
-impl DeviceStream for RtlStream {
-    fn set_frequency(&mut self, freq_hz: f64) -> Result<(), EdgeError> {
-        self.set_frequency(freq_hz)?;
+impl RtlDevice {
+    pub fn new(serial_number: &str) -> EdgeResult<Self> {
+        let search = format!("serial={}", serial_number);
+        let devices = get_rtlsdr_devices(&search)?;
+
+        let rtl_device = devices.into_iter().take(1).next()
+            .ok_or(EdgeError::RtlSdrDeviceNotFound(serial_number.to_string()))?;
+
+        Ok(rtl_device)
+    }
+
+}
+
+pub fn get_rtlsdr_devices(serial_number: &str) -> EdgeResult<Vec<RtlDevice>> {
+    let results = soapysdr::enumerate(serial_number)?;
+
+    let mut devices = Vec::new();
+
+    for args in results {
+
+
+
+        let dev = Device::new(args)?;
+
+        let rx_channel = dev.num_channels(Direction::Rx)?;
+        let rx = dev.rx_stream(&[rx_channel])?;
+
+        let current_sample_rate = if rx_channel > 0 {
+            Some(dev.sample_rate(Direction::Rx, rx_channel)?)
+        } else {
+            None
+        };
+
+        let frequency_ranges = if rx_channel > 0 {
+            dev.frequency_range(Direction::Rx, rx_channel)?
+        } else {
+            Vec::new()
+        };
+
+        devices.push(RtlDevice {
+            device: dev.clone(),
+            stream: rx,
+            current_sample_rate,
+            frequency_ranges,
+            scratch: vec![IqSample::new(0.0, 0.0); 1024],
+        });
+    }
+
+    Ok(devices)
+}
+
+impl DeviceStream for RtlDevice {
+    fn set_frequency(&mut self, freq_hz: f64) -> EdgeResult<()> {
+        self.device.set_frequency(Direction::Rx, 0, freq_hz, ())?;
         Ok(())
     }
 
-    fn capture_dwell(
-        &mut self,
-        center_hz: f64,
-        dwell_ms: u64,
-        settle: &SettleStrategy,
-    ) -> Result<Vec<Complex32>, EdgeError> {
-        dwell_capture(self, center_hz, dwell_ms, settle)
-    }
+
 
     fn discard_buffers(&mut self, count: i64, timeout_us: i64) -> Result<(), EdgeError> {
         for _ in 0..count {
@@ -46,10 +94,7 @@ impl DeviceStream for RtlStream {
         let mut out = Vec::with_capacity(count);
 
         for sample in &self.scratch[..count] {
-            out.push(IqSample {
-                i: sample.re,
-                q: sample.im,
-            }.to_complex());
+            out.push(sample.to_complex());
         }
 
         Ok(out)

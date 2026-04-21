@@ -1,3 +1,5 @@
+use crate::RouterResult;
+
 #[derive(Debug, Clone)]
 pub enum DeviceBackend {
     RtlSdr,

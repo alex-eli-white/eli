@@ -1,5 +1,4 @@
-
-
+use std::ops::DerefMut;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,10 +18,10 @@ use crate::scanner::sweep_planner::SweepPlanner;
 use crate::edge_error::EdgeError;
 use crate::{EdgeResult, HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, HZ_PER_MHZ, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
 use crate::helpers::dc_dcb::power_to_db;
-use crate::scanner::streams::stream_vanilla::DeviceStream;
+use crate::scanner::streams::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
 
-pub struct ScannerRunner<D: DeviceStream> {
-    pub stream: D,
+pub struct ScannerRunner {
+    pub stream: DeviceStreamWrapper,
     pub active_config: ScannerConfig,
     pub pending_config: Arc<Mutex<Option<ScannerConfig>>>,
     pub scanner_running: Arc<AtomicBool>,
@@ -39,9 +38,9 @@ struct EmitContext<'a> {
     hit_cfg: &'a HitDetectorConfig,
 }
 
-impl<D: DeviceStream> ScannerRunner<D> {
+impl ScannerRunner {
     pub fn new(
-        stream: D,
+        stream: DeviceStreamWrapper,
         config: ScannerConfig,
         pending_config: Arc<Mutex<Option<ScannerConfig>>>,
         scanner_running: Arc<AtomicBool>,
@@ -278,7 +277,7 @@ impl<D: DeviceStream> ScannerRunner<D> {
             }
 
             let samples = match dwell_capture(
-                &mut self.stream,
+                 &mut self.stream,
                 point.center_hz,
                 mode_cfg.execution.dwell_ms,
                 &settle,

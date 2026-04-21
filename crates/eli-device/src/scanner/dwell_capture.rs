@@ -1,18 +1,17 @@
+use std::sync::Arc;
 use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
 use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
 use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
-use crate::capture::stream::RtlStream;
 use crate::EdgeResult;
-use crate::scanner::streams::stream_vanilla::DeviceStream;
+use crate::scanner::streams::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
 
-pub fn dwell_capture<D>(
-    stream: &mut D,
+pub fn dwell_capture(
+    stream: &mut DeviceStreamWrapper,
     freq: f64,
     dwell_ms: u64,
     settle: &SettleStrategy,
 ) -> EdgeResult<Vec<Complex32>>
-where D : DeviceStream
 {
     stream.set_frequency(freq)?;
 

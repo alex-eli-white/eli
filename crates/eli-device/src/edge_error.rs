@@ -5,6 +5,8 @@ use std::io::Error;
 pub enum EdgeError {
     Io(std::io::Error),
     JoinError(tokio::task::JoinError),
+    RtlSdrDeviceNotFound(String),
+
 
 }
 impl From<std::io::Error> for EdgeError {
