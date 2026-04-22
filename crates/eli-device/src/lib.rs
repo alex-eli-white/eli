@@ -13,8 +13,6 @@ const POWER_EPSILON: f32 = 1.0e-12;
 //TYPES
 pub type EdgeResult<T> = Result<T, crate::edge_error::EdgeError>;
 
-pub mod capture;
-
 pub mod helpers;
 
 pub mod scanner;

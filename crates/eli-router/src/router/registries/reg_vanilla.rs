@@ -1,10 +1,27 @@
+use std::fmt::{Display, Formatter};
+use std::hash::{Hash, Hasher};
+
 use crate::RouterResult;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeviceBackend {
-    RtlSdr,
-    Soapy,
-    Pluto,
+    Rtl,
+    BladeRf,
+}
+
+impl DeviceBackend {
+    pub fn cli_value(&self) -> &'static str {
+        match self {
+            DeviceBackend::Rtl => "rtl",
+            DeviceBackend::BladeRf => "bladerf",
+        }
+    }
+}
+
+impl Display for DeviceBackend {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.cli_value())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -19,12 +36,47 @@ pub struct DeviceCapabilities<T> {
 
 #[derive(Debug, Clone)]
 pub struct DeviceDescriptor<T> {
-    pub device_id: Option<String>,
+    pub backend: DeviceBackend,
+    pub serial_number: Option<String>,
     pub product: Option<String>,
     pub label: Option<String>,
     pub manufacturer: Option<String>,
-    pub backend: DeviceBackend,
     pub capabilities: DeviceCapabilities<T>,
+}
+
+#[derive(Debug, Clone, Eq)]
+pub struct DeviceIdentity {
+    pub backend: DeviceBackend,
+    pub serial_number: String,
+}
+
+impl PartialEq for DeviceIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.backend == other.backend && self.serial_number == other.serial_number
+    }
+}
+
+impl Hash for DeviceIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.backend.hash(state);
+        self.serial_number.hash(state);
+    }
+}
+
+impl DeviceIdentity {
+    pub fn worker_id(&self) -> String {
+        format!("{}-{}", self.backend.cli_value(), self.serial_number)
+    }
+
+    pub fn socket_name(&self) -> String {
+        format!("{}.sock", self.worker_id())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlLease {
+    pub controller_id: String,
+    pub issued_at_ms: u128,
 }
 
 pub trait DeviceDiscovery {

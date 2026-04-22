@@ -1,6 +1,4 @@
 use std::fmt::{Display, Formatter};
-use std::io::Error;
-use eli_device::edge_error::EdgeError;
 
 #[derive(Debug)]
 pub enum RouterError {
@@ -29,11 +27,6 @@ impl From<serde_json::Error> for RouterError {
     }
 }
 
-
-
-
-
-
 impl From<String> for RouterError {
     fn from(value: String) -> Self {
         RouterError::Message(value)
@@ -46,16 +39,14 @@ impl From<&str> for RouterError {
     }
 }
 
-impl From<soapysdr::Error> for RouterError{
+impl From<soapysdr::Error> for RouterError {
     fn from(value: soapysdr::Error) -> Self {
         RouterError::Soapysdr(value)
     }
 }
 
-
-
-
 impl std::error::Error for RouterError {}
+
 impl Display for RouterError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {

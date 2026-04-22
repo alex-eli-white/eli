@@ -7,7 +7,12 @@ pub enum EdgeError {
     JoinError(tokio::task::JoinError),
     RtlSdrDeviceNotFound(String),
 
+}
 
+impl EdgeError {
+    pub fn msg(msg: String) -> Self {
+        EdgeError::Io(Error::new(std::io::ErrorKind::Other, msg))
+    }
 }
 impl From<std::io::Error> for EdgeError {
     fn from(value: Error) -> Self {

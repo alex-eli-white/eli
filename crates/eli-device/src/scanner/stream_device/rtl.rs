@@ -13,58 +13,90 @@ pub struct RtlDevice {
     pub stream: soapysdr::RxStream<Complex32>,
     pub scratch: Vec<Complex32>,
     pub current_sample_rate: Option<f64>,
+    pub rx_channel_cnt: usize,
     pub frequency_ranges: Vec<SoapySDRRange>,
 }
 
 impl RtlDevice {
     pub fn new(serial_number: &str) -> EdgeResult<Self> {
-        let search = format!("serial={}", serial_number);
-        let devices = get_rtlsdr_devices(&search)?;
+        let serial_number = format!("serial={}", serial_number);
+        let device = open_rtlsdr_by_serial(&serial_number)?;
 
-        let rtl_device = devices.into_iter().take(1).next()
-            .ok_or(EdgeError::RtlSdrDeviceNotFound(serial_number.to_string()))?;
-
-        Ok(rtl_device)
+        Ok(device)
     }
 
 }
 
-pub fn get_rtlsdr_devices(serial_number: &str) -> EdgeResult<Vec<RtlDevice>> {
+// pub fn get_rtlsdr_devices(serial_number: &str) -> EdgeResult<Vec<RtlDevice>> {
+//     let results = soapysdr::enumerate(serial_number)?;
+//
+//     let mut devices = Vec::new();
+//
+//     for args in results {
+//
+//
+//
+//         let dev = Device::new(args)?;
+//
+//         let rx_channel = dev.num_channels(Direction::Rx)?;
+//         let rx = dev.rx_stream(&[rx_channel])?;
+//
+//         let current_sample_rate = if rx_channel > 0 {
+//             Some(dev.sample_rate(Direction::Rx, rx_channel)?)
+//         } else {
+//             None
+//         };
+//
+//         let frequency_ranges = if rx_channel > 0 {
+//             dev.frequency_range(Direction::Rx, rx_channel)?
+//         } else {
+//             Vec::new()
+//         };
+//
+//         devices.push(RtlDevice {
+//             device: dev.clone(),
+//             stream: rx,
+//             current_sample_rate,
+//             channels: rx_channel,
+//             frequency_ranges,
+//             scratch: vec![Complex32::new(0.0, 0.0); 1024],
+//         });
+//     }
+//
+//     Ok(devices)
+// }
+
+
+pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
     let results = soapysdr::enumerate(serial_number)?;
 
-    let mut devices = Vec::new();
+    let args = results
+        .into_iter()
+        .next()
+        .ok_or_else(|| EdgeError::msg(format!("No RTL-SDR found for serial: {serial_number}")))?;
 
-    for args in results {
+    let dev = Device::new(args)?;
 
-
-
-        let dev = Device::new(args)?;
-
-        let rx_channel = dev.num_channels(Direction::Rx)?;
-        let rx = dev.rx_stream(&[rx_channel])?;
-
-        let current_sample_rate = if rx_channel > 0 {
-            Some(dev.sample_rate(Direction::Rx, rx_channel)?)
-        } else {
-            None
-        };
-
-        let frequency_ranges = if rx_channel > 0 {
-            dev.frequency_range(Direction::Rx, rx_channel)?
-        } else {
-            Vec::new()
-        };
-
-        devices.push(RtlDevice {
-            device: dev.clone(),
-            stream: rx,
-            current_sample_rate,
-            frequency_ranges,
-            scratch: vec![Complex32::new(0.0, 0.0); 1024],
-        });
+    let rx_channels = dev.num_channels(Direction::Rx)?;
+    if rx_channels == 0 {
+        return Err(EdgeError::msg(format!(
+            "Device with serial {serial_number} has no RX channels"
+        )));
     }
 
-    Ok(devices)
+    let channel = 0;
+    let stream = dev.rx_stream(&[channel])?;
+    let current_sample_rate = Some(dev.sample_rate(Direction::Rx, channel)?);
+    let frequency_ranges = dev.frequency_range(Direction::Rx, channel)?;
+
+    Ok(RtlDevice {
+        device: dev,
+        stream,
+        current_sample_rate,
+        rx_channel_cnt: rx_channels,
+        frequency_ranges,
+        scratch: vec![Complex32::new(0.0, 0.0); 1024],
+    })
 }
 
 impl DeviceStream for RtlDevice {

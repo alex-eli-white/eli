@@ -18,10 +18,10 @@ use crate::scanner::sweep_planner::SweepPlanner;
 use crate::edge_error::EdgeError;
 use crate::{EdgeResult, HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, HZ_PER_MHZ, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
 use crate::helpers::dc_dcb::power_to_db;
-use crate::scanner::stream_device::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
+use crate::scanner::stream_device::stream_vanilla::{DeviceStream};
 
 pub struct ScannerRunner {
-    pub stream: DeviceStreamWrapper,
+    pub stream: Box<dyn DeviceStream>,
     pub active_config: ScannerConfig,
     pub pending_config: Arc<Mutex<Option<ScannerConfig>>>,
     pub scanner_running: Arc<AtomicBool>,
@@ -40,7 +40,7 @@ struct EmitContext<'a> {
 
 impl ScannerRunner {
     pub fn new(
-        stream: DeviceStreamWrapper,
+        stream: Box<dyn DeviceStream>,
         config: ScannerConfig,
         pending_config: Arc<Mutex<Option<ScannerConfig>>>,
         scanner_running: Arc<AtomicBool>,
@@ -277,7 +277,7 @@ impl ScannerRunner {
             }
 
             let samples = match dwell_capture(
-                 &mut self.stream,
+                 self.stream.as_mut(),
                 point.center_hz,
                 mode_cfg.execution.dwell_ms,
                 &settle,
@@ -342,7 +342,7 @@ impl ScannerRunner {
             }
 
             let samples = match dwell_capture(
-                &mut self.stream,
+                self.stream.as_mut(),
                 mode_cfg.center_hz,
                 mode_cfg.dwell_ms,
                 &mode_cfg.settle,

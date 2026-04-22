@@ -9,7 +9,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.52.1", features = ["full"] }
 eli-device = { path = "../eli-device" }
-eli_protocol = {path = "../eli_protocol" }
+eli_protocol = { path = "../eli_protocol" }
 async-trait = "0.1.89"
 soapysdr = "0.5.0"
 soapysdr-sys = "0.8.1"

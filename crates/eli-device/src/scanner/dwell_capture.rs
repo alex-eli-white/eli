@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
 use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
 use crate::EdgeResult;
-use crate::scanner::stream_device::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
+use crate::scanner::stream_device::stream_vanilla::{DeviceStream};
 
 pub fn dwell_capture(
-    stream: &mut DeviceStreamWrapper,
+    stream: &mut dyn DeviceStream,
     freq: f64,
     dwell_ms: u64,
     settle: &SettleStrategy,

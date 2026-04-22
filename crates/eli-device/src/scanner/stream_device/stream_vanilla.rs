@@ -13,18 +13,3 @@ pub trait DeviceStream: Send {
     fn current_frequency(&self) -> Result<f64, EdgeError>;
 }
 
-pub struct DeviceStreamWrapper(pub Box<dyn DeviceStream>);
-
-impl Deref for DeviceStreamWrapper {
-    type Target = dyn DeviceStream;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
-impl DerefMut for DeviceStreamWrapper {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut()
-    }
-}

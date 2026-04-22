@@ -1,9 +1,8 @@
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent;
+use crate::router::registries::reg_vanilla::ControlLease;
 
-#[derive(Debug, Clone)]
-pub struct RouterEvent {
-    pub worker_id: String,
-    pub source_id: String,
-    pub timestamp_ms: u64,
-    pub event: EdgeEvent,
+pub fn can_issue_control(current: Option<&ControlLease>, controller_id: &str) -> bool {
+    match current {
+        Some(lease) => lease.controller_id == controller_id,
+        None => false,
+    }
 }

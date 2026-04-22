@@ -1,33 +1,19 @@
-use crate::router::registries::device_registry::DeviceRegistry;
-use crate::types::*;
-use crate::router::registries::listener_registry::ListenerRegistry;
-use crate::router::registries::worker_registry::{WorkerHandle, WorkerRegistry};
-
-
-
+use crate::router::flux::event_fanout::RouterBroadcast;
+use crate::router::registries::reg_vanilla::ControlLease;
+use crate::router::registries::worker_registry::WorkerRegistry;
 
 pub struct RouterState {
-    pub devices: DeviceRegistry,
     pub workers: WorkerRegistry,
-    pub listeners: ListenerRegistry,
+    pub broadcaster: RouterBroadcast,
+    pub control_lease: Option<ControlLease>,
 }
 
-impl Default for RouterState {
-    fn default() -> Self {
+impl RouterState {
+    pub fn new(broadcaster: RouterBroadcast) -> Self {
         Self {
-            devices: DeviceRegistry::new(),
             workers: WorkerRegistry::new(),
-            listeners: ListenerRegistry::default(),
+            broadcaster,
+            control_lease: None,
         }
     }
 }
-
-// impl RouterState {
-//     pub fn new() -> Self {
-//         Self {
-//             devices: DeviceRegistry::new(),
-//             workers: WorkerRegistry::new(),
-//             listeners: ListenerRegistry::default(),
-//         }
-//     }
-// }

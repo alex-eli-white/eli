@@ -11,10 +11,9 @@ use tokio::sync::mpsc;
 
 use eli_device::scanner::args_vanilla::{DeviceKindArg, EdgeDeviceArgs};
 use eli_device::edge_error::EdgeError;
-use eli_device::scanner::args_vanilla::DeviceKindArg::BladeRf;
 use eli_device::scanner::runner::ScannerRunner;
 use eli_device::scanner::stream_device::rtl::RtlDevice;
-use eli_device::scanner::stream_device::stream_vanilla::{DeviceStream, DeviceStreamWrapper};
+use eli_device::scanner::stream_device::stream_vanilla::DeviceStream;
 use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent, StatusMessage};
 
@@ -44,10 +43,9 @@ async fn main() -> Result<(), EdgeError> {
         }
         _ => panic!("Unsupported device kind: {:?}", args.device_kind),
     };
-    let wrapper = DeviceStreamWrapper(edge_device);
     
     let runner = ScannerRunner::new(
-        wrapper,
+        edge_device,
         initial_config.clone(),
         pending_config.clone(),
         scanner_running.clone(),

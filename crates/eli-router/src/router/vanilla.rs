@@ -12,7 +12,7 @@ pub enum EventKind {
 pub struct RouterEvent {
     pub worker_id: String,
     pub source_id: String,
-    pub timestamp_ms: u64,
+    pub timestamp_ms: u128,
     pub event: EdgeEvent,
 }
 
