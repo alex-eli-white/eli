@@ -115,14 +115,6 @@ impl FreqRange {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EdgeCommand {
-    SetConfig(ScannerConfig),
-    Start,
-    Stop,
-    Ping,
-    Shutdown,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinValueKind {
@@ -277,13 +269,31 @@ pub enum IqCaptureMode {
     Snapshot,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HelloMessage {
+    pub r#type: String,
+    pub edge_id: String,
+    pub source_id: String,
+    pub timestamp_ms: u128,
+
+    pub worker_id: String,
+    pub backend: String,
+    pub serial_number: String,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EdgeEvent {
+    Hello(HelloMessage),
     Status(StatusMessage),
     Record(RecordMessage),
     Waterfall(Box<WaterfallMessage>),
     IqChunk(IqChunkMessage),
+    SetConfig(ScannerConfig),
+    Start,
+    Stop,
+    Ping,
+    Shutdown,
 }
 
 impl StatusMessage {

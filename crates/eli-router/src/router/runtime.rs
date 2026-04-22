@@ -1,19 +1,54 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use soapysdr_sys::SoapySDRRange;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::router::flux::event_fanout::{new_router_broadcast, RouterBroadcast};
 use crate::router::flux::state::RouterState;
+use crate::router::flux::event_fanout::new_router_broadcast;
 use crate::router::genesis::rtl_genesis::RtlSdrDiscovery;
 use crate::router::registries::reg_vanilla::{
-    ControlLease, DeviceBackend, DeviceDescriptor, DeviceDiscovery, DeviceIdentity,
+    ControlLease, DeviceDescriptor, DeviceDiscovery, DeviceIdentity,
 };
 use crate::router::registries::worker_registry::now_ms;
-use crate::router::vanilla::{EventKind, RouterEvent};
+use crate::router::vanilla::RouterEvent;
 use crate::{RouterError, RouterResult};
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RouterCommand {
+    #[serde(rename = "ping")]
+    Ping,
+
+    #[serde(rename = "list_workers")]
+    ListWorkers,
+
+    #[serde(rename = "stop_worker")]
+    StopWorker { worker_id: String },
+
+    #[serde(rename = "start_worker")]
+    StartWorker { worker_id: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum RouterReply {
+    #[serde(rename = "pong")]
+    Pong,
+
+    #[serde(rename = "workers")]
+    Workers { worker_ids: Vec<String> },
+
+    #[serde(rename = "ok")]
+    Ok { message: String },
+
+    #[serde(rename = "error")]
+    Error { message: String },
+}
 
 pub struct RouterRuntime {
     pub socket_dir: PathBuf,
@@ -30,7 +65,6 @@ impl RouterRuntime {
         edge_device_bin: PathBuf,
         discovery_interval_secs: u64,
     ) -> Self {
-
         let broadcaster = new_router_broadcast(1024);
         let state = Arc::new(Mutex::new(RouterState::new(broadcaster)));
         let (ingress_tx, ingress_rx) = mpsc::channel(1024);
@@ -43,12 +77,12 @@ impl RouterRuntime {
             ingress_tx,
             ingress_rx: Some(ingress_rx),
         }
-
     }
 
     pub async fn run(&mut self) -> RouterResult<()> {
         self.ensure_socket_dir().await?;
         self.spawn_event_ingress_task()?;
+        self.spawn_control_listener()?;
         self.spawn_debug_observer().await;
 
         loop {
@@ -59,9 +93,137 @@ impl RouterRuntime {
 
     async fn ensure_socket_dir(&self) -> RouterResult<()> {
         tokio::fs::create_dir_all(&self.socket_dir).await?;
+
         println!("[router] edge binary: {:?}", self.edge_device_bin);
         println!("[router] socket dir: {:?}", self.socket_dir);
         println!("[router] socket dir exists? {}", self.socket_dir.exists());
+
+        Ok(())
+    }
+
+    fn control_socket_path(&self) -> PathBuf {
+        self.socket_dir.join("router-control.sock")
+    }
+
+    fn remove_stale_socket(path: &Path) -> RouterResult<()> {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    fn spawn_control_listener(&self) -> RouterResult<()> {
+        let socket_path = self.control_socket_path();
+
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        Self::remove_stale_socket(&socket_path)?;
+
+        let listener = UnixListener::bind(&socket_path)?;
+        let state = Arc::clone(&self.state);
+
+        println!("[router] control socket listening at {:?}", socket_path);
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(parts) => parts,
+                    Err(err) => {
+                        eprintln!("[router] control accept error: {}", err);
+                        continue;
+                    }
+                };
+
+                let state = Arc::clone(&state);
+
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => return,
+                        Ok(_) => {}
+                        Err(err) => {
+                            eprintln!("[router] control read error: {}", err);
+                            return;
+                        }
+                    }
+
+                    let reply = match serde_json::from_str::<RouterCommand>(&line) {
+                        Ok(RouterCommand::Ping) => RouterReply::Pong,
+
+                        Ok(RouterCommand::ListWorkers) => {
+                            let state = state.lock().await;
+                            let worker_ids = state.workers.registry.keys().cloned().collect();
+                            RouterReply::Workers { worker_ids }
+                        }
+
+                        Ok(RouterCommand::StopWorker { worker_id }) => {
+                            let mut state = state.lock().await;
+
+                            match state.workers.get_command_sender(&worker_id) {
+                                Some(tx) => {
+                                    match tx.send(eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent::Stop).await {
+                                        Ok(_) => RouterReply::Ok {
+                                            message: format!("stop sent to {}", worker_id),
+                                        },
+                                        Err(err) => RouterReply::Error {
+                                            message: format!("failed sending stop to {}: {}", worker_id, err),
+                                        },
+                                    }
+                                }
+                                None => RouterReply::Error {
+                                    message: format!("unknown worker {}", worker_id),
+                                },
+                            }
+                        }
+
+                        Ok(RouterCommand::StartWorker { worker_id }) => {
+                            let mut state = state.lock().await;
+
+                            match state.workers.get_command_sender(&worker_id) {
+                                Some(tx) => {
+                                    match tx.send(eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent::Start).await {
+                                        Ok(_) => RouterReply::Ok {
+                                            message: format!("start sent to {}", worker_id),
+                                        },
+                                        Err(err) => RouterReply::Error {
+                                            message: format!("failed sending start to {}: {}", worker_id, err),
+                                        },
+                                    }
+                                }
+                                None => RouterReply::Error {
+                                    message: format!("unknown worker {}", worker_id),
+                                },
+                            }
+                        }
+
+                        Err(err) => RouterReply::Error {
+                            message: format!("invalid command: {}", err),
+                        },
+                    };
+
+                    match serde_json::to_string(&reply) {
+                        Ok(json) => {
+                            if let Err(err) = write_half.write_all(json.as_bytes()).await {
+                                eprintln!("[router] control write error: {}", err);
+                                return;
+                            }
+                            if let Err(err) = write_half.write_all(b"\n").await {
+                                eprintln!("[router] control write newline error: {}", err);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("[router] control serialize error: {}", err);
+                        }
+                    }
+                });
+            }
+        });
+
         Ok(())
     }
 
@@ -75,9 +237,7 @@ impl RouterRuntime {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 let mut state_guard = state.lock().await;
-                state_guard
-                    .workers
-                    .update_worker_running(&event.worker_id);
+                state_guard.workers.update_worker_running(&event.worker_id);
                 state_guard
                     .workers
                     .update_last_event_timestamp(&event.worker_id, event.timestamp_ms);

@@ -1,5 +1,4 @@
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,9 +8,9 @@ use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent};
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent};
 
-use crate::router::registries::reg_vanilla::{DeviceBackend, DeviceIdentity};
+use crate::router::registries::reg_vanilla::DeviceIdentity;
 use crate::router::vanilla::RouterEvent;
 use crate::{RouterError, RouterResult};
 
@@ -26,47 +25,52 @@ pub struct WorkerHandle {
     pub worker_id: String,
     pub device: DeviceIdentity,
     pub socket_path: String,
-    pub command_tx: mpsc::Sender<EdgeCommand>,
+    pub command_tx: mpsc::Sender<EdgeEvent>,
     pub state: WorkerState,
     pub last_event_timestamp_ms: Option<u128>,
     pub child: Child,
 }
 
 pub struct WorkerRegistry {
-    workers: HashMap<String, WorkerHandle>,
+    pub(crate) registry: HashMap<String, WorkerHandle>,
 }
 
 impl WorkerRegistry {
     pub fn new() -> Self {
         Self {
-            workers: HashMap::new(),
+            registry: HashMap::new(),
         }
     }
 
     pub fn contains_device(&self, device: &DeviceIdentity) -> bool {
-        self.workers.values().any(|worker| &worker.device == device)
+        self.registry.values().any(|worker| &worker.device == device)
     }
 
     pub fn contains_worker_id(&self, worker_id: &str) -> bool {
-        self.workers.contains_key(worker_id)
+        self.registry.contains_key(worker_id)
     }
 
-    pub fn running_worker_ids(&self) -> HashSet<String> {
-        self.workers.keys().cloned().collect()
+    pub fn worker_ids(&self) -> Vec<String> {
+        self.registry.keys().cloned().collect()
+    }
+
+    pub fn get_command_sender(&self, worker_id: &str) -> Option<mpsc::Sender<EdgeEvent>> {
+        self.registry.get(worker_id).map(|h| h.command_tx.clone())
     }
 
     pub async fn prune_exited(&mut self) -> RouterResult<Vec<String>> {
-        let ids: Vec<String> = self.workers.keys().cloned().collect();
+        let ids: Vec<String> = self.registry.keys().cloned().collect();
         let mut exited = Vec::new();
 
         for worker_id in ids {
-            let should_remove = if let Some(worker) = self.workers.get_mut(&worker_id) {
+            let should_remove = if let Some(worker) = self.registry.get_mut(&worker_id) {
                 match worker.child.try_wait()? {
                     Some(status) => {
                         println!(
                             "[router] worker={} exited status={}",
                             worker.worker_id, status
                         );
+                        worker.state = WorkerState::Exited;
                         true
                     }
                     None => false,
@@ -76,7 +80,12 @@ impl WorkerRegistry {
             };
 
             if should_remove {
-                self.workers.remove(&worker_id);
+                if let Some(worker) = self.registry.remove(&worker_id) {
+                    let socket_path = PathBuf::from(&worker.socket_path);
+                    if socket_path.exists() {
+                        let _ = std::fs::remove_file(&socket_path);
+                    }
+                }
                 exited.push(worker_id);
             }
         }
@@ -85,13 +94,13 @@ impl WorkerRegistry {
     }
 
     pub fn update_worker_running(&mut self, worker_id: &str) {
-        if let Some(worker) = self.workers.get_mut(worker_id) {
+        if let Some(worker) = self.registry.get_mut(worker_id) {
             worker.state = WorkerState::Running;
         }
     }
 
     pub fn update_last_event_timestamp(&mut self, worker_id: &str, timestamp_ms: u128) {
-        if let Some(worker) = self.workers.get_mut(worker_id) {
+        if let Some(worker) = self.registry.get_mut(worker_id) {
             worker.last_event_timestamp_ms = Some(timestamp_ms);
         }
     }
@@ -99,18 +108,18 @@ impl WorkerRegistry {
     pub async fn send_command(
         &self,
         worker_id: &str,
-        cmd: EdgeCommand,
+        cmd: EdgeEvent,
     ) -> RouterResult<()> {
         let worker = self
-            .workers
+            .registry
             .get(worker_id)
             .ok_or_else(|| RouterError::Message(format!("unknown worker: {worker_id}")))?;
 
-        worker
-            .command_tx
-            .send(cmd)
-            .await
-            .map_err(|_| RouterError::Message(format!("failed to send command to worker: {worker_id}")))
+        worker.command_tx.send(cmd).await.map_err(|_| {
+            RouterError::Message(format!(
+                "failed to send command to worker: {worker_id}"
+            ))
+        })
     }
 
     pub async fn spawn_edge_worker(
@@ -136,14 +145,17 @@ impl WorkerRegistry {
         }
 
         println!("[router] cwd: {:?}", std::env::current_dir()?);
-        println!(
-            "[router] edge binary exists? {}",
-            edge_device_bin.exists()
-        );
+        println!("[router] edge binary exists? {}", edge_device_bin.exists());
         println!(
             "[router] edge binary canonical: {:?}",
             std::fs::canonicalize(edge_device_bin)
         );
+        println!("[router] worker socket path: {:?}", socket_path);
+        println!(
+            "[router] worker socket parent exists? {}",
+            socket_path.parent().map(|p| p.exists()).unwrap_or(false)
+        );
+
         let listener = UnixListener::bind(&socket_path)?;
         let socket_path_str = socket_path.to_string_lossy().to_string();
 
@@ -178,22 +190,28 @@ impl WorkerRegistry {
             child,
         };
 
-        self.workers.insert(worker_id.clone(), handle);
+        self.registry.insert(worker_id.clone(), handle);
 
         tokio::spawn(async move {
-            if let Err(err) = handle_worker_connection(listener, worker_id.clone(), event_tx, command_rx).await {
-                eprintln!("[router] worker={} connection task failed: {}", worker_id, err);
+            if let Err(err) =
+                handle_worker_connection(listener, worker_id.clone(), event_tx, command_rx).await
+            {
+                eprintln!(
+                    "[router] worker={} connection task failed: {}",
+                    worker_id, err
+                );
             }
         });
 
         Ok(())
     }
 }
+
 async fn handle_worker_connection(
     listener: UnixListener,
     worker_id: String,
     event_tx: mpsc::Sender<RouterEvent>,
-    mut command_rx: mpsc::Receiver<EdgeCommand>,
+    mut command_rx: mpsc::Receiver<EdgeEvent>,
 ) -> RouterResult<()> {
     let (stream, _) = listener.accept().await?;
     let (read_half, mut write_half) = stream.into_split();
@@ -204,6 +222,7 @@ async fn handle_worker_connection(
             write_half.write_all(line.as_bytes()).await?;
             write_half.write_all(b"\n").await?;
         }
+
         Ok::<(), RouterError>(())
     });
 
@@ -233,10 +252,12 @@ async fn handle_worker_connection(
 
 fn extract_source_id(event: &EdgeEvent) -> String {
     match event {
-        EdgeEvent::Status(msg) => msg.edge_id.clone(),
+        EdgeEvent::Status(msg) => msg.source_id.clone(),
         EdgeEvent::Record(msg) => msg.record_ctx.source_id.clone(),
         EdgeEvent::Waterfall(msg) => msg.record_ctx.source_id.clone(),
         EdgeEvent::IqChunk(msg) => msg.record_ctx.source_id.clone(),
+        EdgeEvent::Hello(msg) => msg.source_id.clone(),
+        _ => "source-not-available".to_string(),
     }
 }
 
@@ -246,6 +267,8 @@ fn extract_timestamp_ms(event: &EdgeEvent) -> u128 {
         EdgeEvent::Record(msg) => msg.record_ctx.timestamp_ms,
         EdgeEvent::Waterfall(msg) => msg.record_ctx.timestamp_ms,
         EdgeEvent::IqChunk(msg) => msg.record_ctx.timestamp_ms,
+        EdgeEvent::Hello(msg) => msg.timestamp_ms,
+        _ => now_ms(),
     }
 }
 

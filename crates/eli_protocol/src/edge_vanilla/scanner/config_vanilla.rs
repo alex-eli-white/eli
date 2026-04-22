@@ -34,6 +34,7 @@ pub struct FixedModeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
     pub source_id: String,
+    pub timestamp_ms: u128,
     pub edge_id: String,
     pub sample_rate_hz: f64,
     pub settle: SettleStrategy,
@@ -53,6 +54,7 @@ impl ScannerConfig {
         Self {
             edge_id: worker_id,
             source_id: "rtl-sdr-0".to_string(),
+            timestamp_ms: now_ms(),
             sample_rate_hz: 2_048_000.0,
             settle: SettleStrategy::SleepAndFlush {
                 millis: 5,
@@ -62,6 +64,13 @@ impl ScannerConfig {
             mode: ScannerMode::Idle,
         }
     }
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u128)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -15,7 +15,7 @@ use eli_device::scanner::runner::ScannerRunner;
 use eli_device::scanner::stream_device::rtl::RtlDevice;
 use eli_device::scanner::stream_device::stream_vanilla::DeviceStream;
 use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeCommand, EdgeEvent, StatusMessage};
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent, StatusMessage};
 
 
 #[tokio::main]
@@ -85,10 +85,10 @@ async fn main() -> Result<(), EdgeError> {
         loop {
             match lines.next_line().await? {
                 Some(line) => {
-                    let cmd: EdgeCommand = serde_json::from_str(&line)?;
+                    let event: EdgeEvent = serde_json::from_str(&line)?;
 
-                    match cmd {
-                        EdgeCommand::SetConfig(cfg) => {
+                    match event {
+                        EdgeEvent::SetConfig(cfg) => {
                             let edge_id = cfg.edge_id.clone();
                             let source_id = cfg.source_id.clone();
 
@@ -112,7 +112,7 @@ async fn main() -> Result<(), EdgeError> {
                             ));
                         }
 
-                        EdgeCommand::Start => {
+                        EdgeEvent::Start => {
                             scanner_running_for_cmd.store(true, Ordering::Relaxed);
 
                             let (edge_id, source_id) = {
@@ -130,7 +130,7 @@ async fn main() -> Result<(), EdgeError> {
                             ));
                         }
 
-                        EdgeCommand::Stop => {
+                        EdgeEvent::Stop => {
                             scanner_running_for_cmd.store(false, Ordering::Relaxed);
 
                             let (edge_id, source_id) = {
@@ -148,7 +148,7 @@ async fn main() -> Result<(), EdgeError> {
                             ));
                         }
 
-                        EdgeCommand::Ping => {
+                        EdgeEvent::Ping => {
                             let dropped = dropped_events_for_cmd.load(Ordering::Relaxed);
 
                             let (edge_id, source_id) = {
@@ -166,7 +166,7 @@ async fn main() -> Result<(), EdgeError> {
                             ));
                         }
 
-                        EdgeCommand::Shutdown => {
+                        EdgeEvent::Shutdown => {
                             scanner_running_for_cmd.store(false, Ordering::Relaxed);
                             shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
 
@@ -186,6 +186,7 @@ async fn main() -> Result<(), EdgeError> {
 
                             break;
                         }
+                        _ => {}
                     }
                 }
 
@@ -194,6 +195,7 @@ async fn main() -> Result<(), EdgeError> {
                     shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
                     break;
                 }
+
             }
         }
 

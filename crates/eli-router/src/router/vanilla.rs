@@ -6,6 +6,12 @@ pub enum EventKind {
     Record,
     Waterfall,
     IqChunk,
+    SetConfig,
+    Hello,
+    Start,
+    Stop,
+    Ping,
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +29,12 @@ impl RouterEvent {
             EdgeEvent::Record(_) => EventKind::Record,
             EdgeEvent::Waterfall(_) => EventKind::Waterfall,
             EdgeEvent::IqChunk(_) => EventKind::IqChunk,
+            EdgeEvent::Hello(_) => EventKind::Hello,
+            EdgeEvent::Start => EventKind::Start,
+            EdgeEvent::Stop => EventKind::Stop,
+            EdgeEvent::Ping => EventKind::Ping,
+            EdgeEvent::Shutdown => EventKind::Shutdown,
+            EdgeEvent::SetConfig(_) => EventKind::SetConfig,
         }
     }
 }
