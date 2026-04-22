@@ -114,7 +114,7 @@ async fn main() -> Result<(), EdgeError> {
 
                         EdgeEvent::Start => {
                             scanner_running_for_cmd.store(true, Ordering::Relaxed);
-
+                            println!("scanner start requested");
                             let (edge_id, source_id) = {
                                 let identity = status_identity_for_cmd.lock().unwrap();
                                 identity.clone()
