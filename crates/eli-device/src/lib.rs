@@ -9,6 +9,8 @@ const SCANNER_SLEEP_TIME_MS: u64 = 100;
 
 const POWER_EPSILON: f32 = 1.0e-12;
 
+const READ_CHUNK_SAMPLES: usize = 2048;
+
 
 //TYPES
 pub type EdgeResult<T> = Result<T, crate::edge_error::EdgeError>;

@@ -4,8 +4,10 @@ use std::io::Error;
 #[derive(Debug)]
 pub enum EdgeError {
     Io(std::io::Error),
+    ErrorMessage(String),
     JoinError(tokio::task::JoinError),
     RtlSdrDeviceNotFound(String),
+    Soapy(String)
 
 }
 
@@ -16,19 +18,19 @@ impl EdgeError {
 }
 impl From<std::io::Error> for EdgeError {
     fn from(value: Error) -> Self {
-        todo!()
+        EdgeError::ErrorMessage(value.to_string())
     }
 }
 
 impl From<tokio::task::JoinError> for EdgeError {
     fn from(value: tokio::task::JoinError) -> Self {
-        todo!()
+        EdgeError::JoinError(value)
     }
 }
 
 impl From<String> for EdgeError {
     fn from(value: String) -> Self {
-        todo!()
+        EdgeError::ErrorMessage(value)
     }
 }
 
@@ -40,19 +42,26 @@ impl From<serde_json::Error> for EdgeError {
 
 impl From<&str> for EdgeError {
     fn from(value: &str) -> Self {
-        todo!()
+        EdgeError::ErrorMessage(value.to_string())
     }
 }
 
 impl From<soapysdr::Error> for EdgeError{
     fn from(value: soapysdr::Error) -> Self {
-        todo!()
+        EdgeError::Soapy(value.to_string())
     }
 }
 
 impl Display for EdgeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+
+        match self {
+            EdgeError::Io(e) => write!(f, "io error: {}", e),
+            EdgeError::ErrorMessage(e) => write!(f, "error message: {}", e),
+            EdgeError::JoinError(e) => write!(f, "join error: {}", e),
+            EdgeError::RtlSdrDeviceNotFound(e) => write!(f, "rtl sdr device not found: {}", e),
+            EdgeError::Soapy(e) => write!(f, "soapy error: {}", e),
+        }
     }
 }
 

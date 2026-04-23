@@ -1,5 +1,8 @@
 use std::fmt::{Display, Formatter};
 
+pub type RouterResult<T> = Result<T, RouterError>;
+
+
 #[derive(Debug)]
 pub enum RouterError {
     Io(std::io::Error),

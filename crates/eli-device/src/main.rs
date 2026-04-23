@@ -30,7 +30,7 @@ async fn main() -> Result<(), EdgeError> {
     let dropped_events = Arc::new(AtomicU64::new(0));
 
     let initial_config = ScannerConfig::default_for_worker(args.worker_id.clone());
-    let pending_config = Arc::new(Mutex::new(Some(initial_config.clone())));
+    let pending_config = Arc::new(Mutex::new(None));//Some(initial_config.clone())));
     let status_identity = Arc::new(Mutex::new((
         initial_config.edge_id.clone(),
         initial_config.source_id.clone(),
@@ -92,29 +92,37 @@ async fn main() -> Result<(), EdgeError> {
                             let edge_id = cfg.edge_id.clone();
                             let source_id = cfg.source_id.clone();
 
+
                             {
-                                let mut pending = pending_config_for_cmd.lock().unwrap();
-                                *pending = Some(cfg);
+                                let mut guard = pending_config_for_cmd.lock().unwrap();
+                                *guard = Some(cfg);
                             }
+                            eprintln!("[worker] pending_config set");
 
                             {
                                 let mut identity = status_identity_for_cmd.lock().unwrap();
                                 *identity = (edge_id.clone(), source_id.clone());
                             }
 
-                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(
-                                StatusMessage::new(
-                                    edge_id,
-                                    source_id,
-                                    "config_pending",
-                                    "received scanner configuration",
-                                ),
-                            ));
                         }
 
                         EdgeEvent::Start => {
-                            scanner_running_for_cmd.store(true, Ordering::Relaxed);
-                            println!("scanner start requested");
+                            scanner_running_for_cmd.store(true, Ordering::SeqCst);
+                            eprintln!(
+                                "[worker] scanner_running after start = {}",
+                                scanner_running_for_cmd.load(Ordering::SeqCst)
+                            );
+                            let now_running = scanner_running_for_cmd.load(Ordering::SeqCst);
+
+                            let _ = event_tx_for_cmd.try_send(EdgeEvent::Status(
+                                StatusMessage::new(
+                                    "edge_id".to_string(),
+                                    "source_id".to_string(),
+                                    "started",
+                                    format!("scanner start requested running_now={}", now_running),
+                                ),
+                            ));
+
                             let (edge_id, source_id) = {
                                 let identity = status_identity_for_cmd.lock().unwrap();
                                 identity.clone()
@@ -131,7 +139,7 @@ async fn main() -> Result<(), EdgeError> {
                         }
 
                         EdgeEvent::Stop => {
-                            scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                            scanner_running_for_cmd.store(false, Ordering::SeqCst);
 
                             let (edge_id, source_id) = {
                                 let identity = status_identity_for_cmd.lock().unwrap();
@@ -167,7 +175,7 @@ async fn main() -> Result<(), EdgeError> {
                         }
 
                         EdgeEvent::Shutdown => {
-                            scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                            scanner_running_for_cmd.store(false, Ordering::SeqCst);
                             shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
 
                             let (edge_id, source_id) = {
@@ -191,7 +199,7 @@ async fn main() -> Result<(), EdgeError> {
                 }
 
                 None => {
-                    scanner_running_for_cmd.store(false, Ordering::Relaxed);
+                    scanner_running_for_cmd.store(false, Ordering::SeqCst);
                     shutdown_requested_for_cmd.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -202,10 +210,23 @@ async fn main() -> Result<(), EdgeError> {
         Ok::<(), EdgeError>(())
     });
 
-    let scanner_task = tokio::task::spawn_blocking(move || runner.run_edge_loop(event_tx));
+    let scanner_task = tokio::task::spawn_blocking(move || -> Result<(), EdgeError> {
+        eprintln!("[scanner] runner thread starting");
 
-    let _ = tokio::try_join!(writer_task, command_task)?;
-    scanner_task.await??;
+
+
+        runner.run_edge_loop(event_tx.clone())?;
+
+        eprintln!("[scanner] runner exited cleanly");
+        Ok(())
+    });
+
+    let (writer_res, command_res, scanner_res) =
+        tokio::try_join!(writer_task, command_task, scanner_task)?;
+
+    writer_res?;
+    command_res?;
+    scanner_res?;
 
     Ok(())
 }

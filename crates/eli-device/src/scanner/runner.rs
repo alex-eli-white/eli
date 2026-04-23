@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 use eli_protocol::edge_vanilla::scanner::config_vanilla::{FixedModeConfig, Hit, HitDetectorConfig, ScannerConfig, ScannerMode, SweepModeConfig};
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::{AnalysisResult, BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, WaterfallMessage};
+use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{AnalysisResult, BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, StatusMessage, WaterfallMessage};
 use eli_protocol::edge_vanilla::scanner::sweep_vanilla::SweepPolicy;
 
 
@@ -57,14 +58,27 @@ impl ScannerRunner {
         }
     }
 
-    fn apply_pending_config(&mut self) -> EdgeResult<bool> {
+    fn apply_pending_config(&mut self, edge_tx: &mpsc::Sender<EdgeEvent>) -> EdgeResult<bool> {
         let new_cfg = {
             let mut pending = self.pending_config.lock().unwrap();
             pending.take()
         };
 
         if let Some(new_cfg) = new_cfg {
+            eprintln!("[scanner] applying pending config: {:?}", new_cfg.mode);
+
             self.active_config = new_cfg;
+
+            self.try_emit(
+                edge_tx,
+                EdgeEvent::Status(StatusMessage::new(
+                    self.active_config.edge_id.clone(),
+                    self.active_config.source_id.clone(),
+                    "config_applied",
+                    &format!("active mode now {:?}", self.active_config.mode),
+                )),
+            );
+
             return Ok(true);
         }
 
@@ -263,31 +277,55 @@ impl ScannerRunner {
         let sample_rate_hz = self.active_config.sample_rate_hz;
         let settle = self.active_config.settle.clone();
 
+        self.stream.set_sample_rate(self.active_config.sample_rate_hz)?;
+
+        eprintln!(
+            "[scanner] configured sample rate now {}",
+            self.stream.current_sample_rate()?
+        );
+
         while let Some(point) = planner.pop_next() {
+            eprintln!("[sweep] point center_hz={}", point.center_hz);
             if self.shutdown_requested.load(Ordering::Relaxed) {
                 break;
             }
 
-            if !self.scanner_running.load(Ordering::Relaxed) {
+            if !self.scanner_running.load(Ordering::SeqCst) {
                 break;
             }
 
-            if self.apply_pending_config()? {
+            if self.apply_pending_config(edge_tx)? {
                 break;
             }
 
             let samples = match dwell_capture(
-                 self.stream.as_mut(),
+                self.stream.as_mut(),
                 point.center_hz,
                 mode_cfg.execution.dwell_ms,
                 &settle,
             ) {
-                Ok(samples) => samples,
-                Err(err) => match self.handle_capture_error(err, point.center_hz)? {
-                    Some(samples) => samples,
-                    None => continue,
-                },
+                Ok(samples) => {
+                    eprintln!(
+                        "[sweep] capture_ok center_hz={} samples={}",
+                        point.center_hz,
+                        samples.len()
+                    );
+                    samples
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[sweep] capture_err center_hz={} err={}",
+                        point.center_hz,
+                        err
+                    );
+
+                    match self.handle_capture_error(err, point.center_hz)? {
+                        Some(samples) => samples,
+                        None => continue,
+                    }
+                }
             };
+
 
             if samples.len() < mode_cfg.fft_min_samples {
                 continue;
@@ -298,6 +336,8 @@ impl ScannerRunner {
                 point.center_hz,
                 sample_rate_hz,
             );
+
+
 
             let timestamp_ms = now_ms();
             let emit_context = EmitContext {
@@ -310,6 +350,7 @@ impl ScannerRunner {
             };
 
             let maybe_hit = self.emit_messages(&analysis, timestamp_ms, &emit_context)?;
+
 
             if let Some(hit) = maybe_hit.filter(|_| matches!(mode_cfg.policy, SweepPolicy::PriorityHotspots)) {
                 planner.reprioritize_near(hit.peak_hz, HOTSPOT_REPRIORITIZE_WEIGHT, HOTSPOT_REPRIORITIZE_RADIUS_HZ);
@@ -333,11 +374,11 @@ impl ScannerRunner {
                 break;
             }
 
-            if !self.scanner_running.load(Ordering::Relaxed) {
+            if !self.scanner_running.load(Ordering::SeqCst) {
                 break;
             }
 
-            if self.apply_pending_config()? {
+            if self.apply_pending_config(edge_tx)? {
                 break;
             }
 
@@ -401,34 +442,82 @@ impl ScannerRunner {
     }
 
     pub fn run_edge_loop(mut self, edge_tx: mpsc::Sender<EdgeEvent>) -> EdgeResult<()> {
+
+
         let hit_cfg = HitDetectorConfig::default();
+
+
+
         self.stream.activate()?;
 
+
+
         loop {
-            if self.shutdown_requested.load(Ordering::Relaxed) {
+            let running = self.scanner_running.load(Ordering::SeqCst);
+            let mode = format!("{:?}", self.active_config.mode);
+
+
+            if self.shutdown_requested.load(Ordering::SeqCst) {
                 break;
             }
 
-            if self.apply_pending_config()? {
+            if self.apply_pending_config(&edge_tx)? {
                 continue;
             }
 
-            if !self.scanner_running.load(Ordering::Relaxed) {
+            if !self.scanner_running.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(SCANNER_SLEEP_TIME_MS));
                 continue;
             }
 
             match self.active_config.mode.clone() {
                 ScannerMode::Sweep(mode_cfg) => {
+
+                    self.try_emit(
+                        &edge_tx,
+                        EdgeEvent::Status(StatusMessage::new(
+                            self.active_config.edge_id.clone(),
+                            self.active_config.source_id.clone(),
+                            "mode_enter",
+                            "entering sweep mode",
+                        )),
+                    );
+
                     self.run_sweep_mode(mode_cfg, &edge_tx, &hit_cfg)?;
                 }
                 ScannerMode::Fixed(mode_cfg) => {
+                    self.try_emit(
+                        &edge_tx,
+                        EdgeEvent::Status(StatusMessage::new(
+                            self.active_config.edge_id.clone(),
+                            self.active_config.source_id.clone(),
+                            "mode_enter",
+                            "entering fixed mode",
+                        )),
+                    );
+
                     self.run_fixed_mode(mode_cfg, &edge_tx, &hit_cfg)?;
                 }
                 ScannerMode::Idle => {
+                    self.try_emit(
+                        &edge_tx,
+                        EdgeEvent::Status(StatusMessage::new(
+                            self.active_config.edge_id.clone(),
+                            self.active_config.source_id.clone(),
+                            "mode_enter",
+                            "idle mode",
+                        )),
+                    );
+
                     std::thread::sleep(Duration::from_millis(SCANNER_SLEEP_TIME_MS));
                 }
             }
+
+            eprintln!(
+                "[scanner] tick running={} mode={:?}",
+                self.scanner_running.load(Ordering::SeqCst),
+                self.active_config.mode
+            );
         }
 
         Ok(())

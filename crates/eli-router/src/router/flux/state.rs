@@ -1,5 +1,5 @@
+use eli_protocol::router_vanilla::device_vanilla::ControlLease;
 use crate::router::flux::event_fanout::RouterBroadcast;
-use crate::router::registries::reg_vanilla::ControlLease;
 use crate::router::registries::worker_registry::WorkerRegistry;
 
 pub struct RouterState {

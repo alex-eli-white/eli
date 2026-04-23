@@ -11,15 +11,17 @@ pub fn dwell_capture(
     freq: f64,
     dwell_ms: u64,
     settle: &SettleStrategy,
-) -> EdgeResult<Vec<Complex32>>
-{
+) -> EdgeResult<Vec<Complex32>> {
+    eprintln!("[dwell] set_frequency {}", freq);
     stream.set_frequency(freq)?;
 
     match settle {
         SettleStrategy::SleepOnly { millis } => {
+            eprintln!("[dwell] settle sleep {}", millis);
             std::thread::sleep(std::time::Duration::from_millis(*millis));
         }
         SettleStrategy::FlushBuffers { count, timeout_us } => {
+            eprintln!("[dwell] flush count={} timeout_us={}", count, timeout_us);
             stream.discard_buffers(*count, *timeout_us)?;
         }
         SettleStrategy::SleepAndFlush {
@@ -27,7 +29,9 @@ pub fn dwell_capture(
             flush_count,
             timeout_us,
         } => {
+            eprintln!("[dwell] settle sleep {}", millis);
             std::thread::sleep(std::time::Duration::from_millis(*millis));
+            eprintln!("[dwell] flush count={} timeout_us={}", flush_count, timeout_us);
             stream.discard_buffers(*flush_count, *timeout_us)?;
         }
     }
@@ -36,11 +40,12 @@ pub fn dwell_capture(
     let start = std::time::Instant::now();
 
     while start.elapsed().as_millis() < dwell_ms as u128 {
+        eprintln!("[dwell] read_samples");
         let chunk = stream.read_samples(DEFAULT_SAMPLE_TIMEOUT)?;
-        samples.extend(chunk.into_iter());
+        eprintln!("[dwell] got chunk len={}", chunk.len());
+        samples.extend(chunk);
     }
 
     Ok(samples)
 }
-
 

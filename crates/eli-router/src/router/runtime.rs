@@ -7,48 +7,49 @@ use soapysdr_sys::SoapySDRRange;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
-
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent;
+use eli_protocol::router_vanilla::cmd_vanilla::{RouterCommand, RouterEvent, RouterReply};
+use eli_protocol::router_vanilla::device_vanilla::{ControlLease, DeviceDescriptor, DeviceDiscovery, DeviceIdentity};
+use eli_protocol::router_vanilla::result_vanilla::{RouterError, RouterResult};
+use crate::router::config_helper::{fixed_config, fm_sweep_config, idle_config};
 use crate::router::flux::state::RouterState;
 use crate::router::flux::event_fanout::new_router_broadcast;
 use crate::router::genesis::rtl_genesis::RtlSdrDiscovery;
-use crate::router::registries::reg_vanilla::{
-    ControlLease, DeviceDescriptor, DeviceDiscovery, DeviceIdentity,
-};
+
 use crate::router::registries::worker_registry::now_ms;
-use crate::router::vanilla::RouterEvent;
-use crate::{RouterError, RouterResult};
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum RouterCommand {
-    #[serde(rename = "ping")]
-    Ping,
 
-    #[serde(rename = "list_workers")]
-    ListWorkers,
-
-    #[serde(rename = "stop_worker")]
-    StopWorker { worker_id: String },
-
-    #[serde(rename = "start_worker")]
-    StartWorker { worker_id: String },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum RouterReply {
-    #[serde(rename = "pong")]
-    Pong,
-
-    #[serde(rename = "workers")]
-    Workers { worker_ids: Vec<String> },
-
-    #[serde(rename = "ok")]
-    Ok { message: String },
-
-    #[serde(rename = "error")]
-    Error { message: String },
-}
+// #[derive(Debug, Deserialize)]
+// #[serde(tag = "type")]
+// enum RouterCommand {
+//     #[serde(rename = "ping")]
+//     Ping,
+//
+//     #[serde(rename = "list_workers")]
+//     ListWorkers,
+//
+//     #[serde(rename = "stop_worker")]
+//     StopWorker { worker_id: String },
+//
+//     #[serde(rename = "start_worker")]
+//     StartWorker { worker_id: String },
+// }
+//
+// #[derive(Debug, Serialize)]
+// #[serde(tag = "type")]
+// enum RouterReply {
+//     #[serde(rename = "pong")]
+//     Pong,
+//
+//     #[serde(rename = "workers")]
+//     Workers { worker_ids: Vec<String> },
+//
+//     #[serde(rename = "ok")]
+//     Ok { message: String },
+//
+//     #[serde(rename = "error")]
+//     Error { message: String },
+// }
 
 pub struct RouterRuntime {
     pub socket_dir: PathBuf,
@@ -85,18 +86,16 @@ impl RouterRuntime {
         self.spawn_control_listener()?;
         self.spawn_debug_observer().await;
 
+        self.reconcile_once().await?;
+
         loop {
-            self.reconcile_once().await?;
             tokio::time::sleep(self.discovery_interval).await;
         }
     }
-
     async fn ensure_socket_dir(&self) -> RouterResult<()> {
         tokio::fs::create_dir_all(&self.socket_dir).await?;
 
-        println!("[router] edge binary: {:?}", self.edge_device_bin);
-        println!("[router] socket dir: {:?}", self.socket_dir);
-        println!("[router] socket dir exists? {}", self.socket_dir.exists());
+
 
         Ok(())
     }
@@ -123,8 +122,6 @@ impl RouterRuntime {
 
         let listener = UnixListener::bind(&socket_path)?;
         let state = Arc::clone(&self.state);
-
-        println!("[router] control socket listening at {:?}", socket_path);
 
         tokio::spawn(async move {
             loop {
@@ -162,16 +159,64 @@ impl RouterRuntime {
                         }
 
                         Ok(RouterCommand::StopWorker { worker_id }) => {
-                            let mut state = state.lock().await;
+                            let tx = {
+                                let state = state.lock().await;
+                                state.workers.get_command_sender(&worker_id)
+                            };
 
-                            match state.workers.get_command_sender(&worker_id) {
+                            match tx {
+                                Some(tx) => match tx.send(EdgeEvent::Stop).await {
+                                    Ok(_) => RouterReply::Ok {
+                                        message: format!("stop sent to {}", worker_id),
+                                    },
+                                    Err(err) => RouterReply::Error {
+                                        message: format!("failed sending stop to {}: {}", worker_id, err),
+                                    },
+                                },
+                                None => RouterReply::Error {
+                                    message: format!("unknown worker {}", worker_id),
+                                },
+                            }
+                        }
+
+                        Ok(RouterCommand::StartWorker { worker_id }) => {
+                            let tx = {
+                                let state = state.lock().await;
+                                state.workers.get_command_sender(&worker_id)
+                            };
+
+
+
+                            match tx {
+                                Some(tx) => match tx.send(EdgeEvent::Start).await {
+                                    Ok(_) => RouterReply::Ok {
+                                        message: format!("start sent to {}", worker_id),
+                                    },
+                                    Err(err) => RouterReply::Error {
+                                        message: format!("failed sending start to {}: {}", worker_id, err),
+                                    },
+                                },
+                                None => RouterReply::Error {
+                                    message: format!("unknown worker {}", worker_id),
+                                },
+                            }
+                        }
+
+                        Ok(RouterCommand::SetIdle { worker_id }) => {
+                            let tx = {
+                                let state = state.lock().await;
+                                state.workers.get_command_sender(&worker_id)
+                            };
+
+                            match tx {
                                 Some(tx) => {
-                                    match tx.send(eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent::Stop).await {
+                                    let cfg = idle_config(&worker_id);
+                                    match tx.send(EdgeEvent::SetConfig(cfg)).await {
                                         Ok(_) => RouterReply::Ok {
-                                            message: format!("stop sent to {}", worker_id),
+                                            message: format!("idle config sent to {}", worker_id),
                                         },
                                         Err(err) => RouterReply::Error {
-                                            message: format!("failed sending stop to {}: {}", worker_id, err),
+                                            message: format!("failed sending idle config to {}: {}", worker_id, err),
                                         },
                                     }
                                 }
@@ -181,17 +226,46 @@ impl RouterRuntime {
                             }
                         }
 
-                        Ok(RouterCommand::StartWorker { worker_id }) => {
-                            let mut state = state.lock().await;
+                        Ok(RouterCommand::SetSweepFm { worker_id }) => {
+                            let tx = {
+                                let state = state.lock().await;
+                                state.workers.get_command_sender(&worker_id)
+                            };
 
-                            match state.workers.get_command_sender(&worker_id) {
+
+                            match tx {
                                 Some(tx) => {
-                                    match tx.send(eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent::Start).await {
+                                    let cfg = fm_sweep_config(&worker_id);
+                                    match tx.send(EdgeEvent::SetConfig(cfg)).await {
                                         Ok(_) => RouterReply::Ok {
-                                            message: format!("start sent to {}", worker_id),
+                                            message: format!("fm sweep config sent to {}", worker_id),
                                         },
                                         Err(err) => RouterReply::Error {
-                                            message: format!("failed sending start to {}: {}", worker_id, err),
+                                            message: format!("failed sending fm sweep config to {}: {}", worker_id, err),
+                                        },
+                                    }
+                                }
+                                None => RouterReply::Error {
+                                    message: format!("unknown worker {}", worker_id),
+                                },
+                            }
+                        }
+
+                        Ok(RouterCommand::SetFixed { worker_id, center_hz }) => {
+                            let tx = {
+                                let state = state.lock().await;
+                                state.workers.get_command_sender(&worker_id)
+                            };
+
+                            match tx {
+                                Some(tx) => {
+                                    let cfg = fixed_config(&worker_id, center_hz);
+                                    match tx.send(EdgeEvent::SetConfig(cfg)).await {
+                                        Ok(_) => RouterReply::Ok {
+                                            message: format!("fixed config sent to {} ({:.3} MHz)", worker_id, center_hz / 1e6),
+                                        },
+                                        Err(err) => RouterReply::Error {
+                                            message: format!("failed sending fixed config to {}: {}", worker_id, err),
                                         },
                                     }
                                 }
@@ -259,12 +333,26 @@ impl RouterRuntime {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        println!(
-                            "[router] worker={} source={} kind={:?}",
-                            event.worker_id,
-                            event.source_id,
-                            event.kind()
-                        );
+
+                        match &event.event {
+                            EdgeEvent::Status(msg) => {
+                                // println!(
+                                //     "[router] worker={} source={} STATUS status={} message={}",
+                                //     event.worker_id,
+                                //     event.source_id,
+                                //     msg.status,
+                                //     msg.message,
+                                // );
+                            }
+                            other => {
+                                println!(
+                                    "[router] worker={} source={} EVENT {:?}",
+                                    event.worker_id,
+                                    event.source_id,
+                                    other,
+                                );
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(count)) => {
                         eprintln!("[router] debug observer lagged and dropped {} events", count);
@@ -297,15 +385,23 @@ impl RouterRuntime {
                 continue;
             }
 
-            println!(
-                "[router] spawning worker for backend={} serial={} label={:?} product={:?}",
-                device.backend,
-                device.serial_number,
-                descriptor.label,
-                descriptor.product,
-            );
+            // println!(
+            //     "[router] spawning worker for backend={} serial={} label={:?} product={:?}",
+            //     device.backend,
+            //     device.serial_number,
+            //     descriptor.label,
+            //     descriptor.product,
+            // );
 
             let mut state = self.state.lock().await;
+
+            // println!(
+            //     "[router] discovered backend={} serial={} already_running={}",
+            //     device.backend,
+            //     device.serial_number,
+            //     already_running
+            // );
+
             state
                 .workers
                 .spawn_edge_worker(
@@ -354,10 +450,8 @@ impl RouterRuntime {
 
     pub async fn release_control(&self, controller_id: &str) {
         let mut state = self.state.lock().await;
-        if let Some(lease) = &state.control_lease {
-            if lease.controller_id == controller_id {
-                state.control_lease = None;
-            }
+        if let Some(lease) = &state.control_lease && lease.controller_id == controller_id {
+                state.control_lease = None
         }
     }
 }

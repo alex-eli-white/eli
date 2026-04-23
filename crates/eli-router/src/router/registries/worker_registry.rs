@@ -8,11 +8,10 @@ use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent};
-
-use crate::router::registries::reg_vanilla::DeviceIdentity;
-use crate::router::vanilla::RouterEvent;
-use crate::{RouterError, RouterResult};
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent, StatusMessage};
+use eli_protocol::router_vanilla::cmd_vanilla::RouterEvent;
+use eli_protocol::router_vanilla::device_vanilla::DeviceIdentity;
+use eli_protocol::router_vanilla::result_vanilla::{RouterError, RouterResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {

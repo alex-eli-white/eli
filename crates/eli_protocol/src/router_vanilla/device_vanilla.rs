@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-use crate::RouterResult;
+use crate::router_vanilla::result_vanilla::RouterResult;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeviceBackend {

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use clap::Parser;
 use eli_router::router::runtime::RouterRuntime;
-use eli_router::router_error::RouterError;
+use eli_protocol::router_vanilla::result_vanilla::RouterError;
 
 #[derive(Debug, Parser)]
 struct RouterArgs {

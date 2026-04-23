@@ -3,7 +3,7 @@ use soapysdr::{Device, Direction};
 use soapysdr_sys::SoapySDRRange;
 
 use crate::edge_error::EdgeError;
-use crate::EdgeResult;
+use crate::{EdgeResult, READ_CHUNK_SAMPLES};
 use crate::scanner::stream_device::stream_vanilla::DeviceStream;
 
 
@@ -19,8 +19,8 @@ pub struct RtlDevice {
 
 impl RtlDevice {
     pub fn new(serial_number: &str) -> EdgeResult<Self> {
-        let serial_number = format!("serial={}", serial_number);
-        let device = open_rtlsdr_by_serial(&serial_number)?;
+        let args = format!("driver=rtlsdr,serial={}", serial_number);
+        let device = open_rtlsdr_by_serial(&args)?;
 
         Ok(device)
     }
@@ -77,6 +77,9 @@ pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
 
     let dev = Device::new(args)?;
 
+    eprintln!("driver={}", dev.driver_key()?);
+    eprintln!("hardware={}", dev.hardware_key()?);
+
     let rx_channels = dev.num_channels(Direction::Rx)?;
     if rx_channels == 0 {
         return Err(EdgeError::msg(format!(
@@ -88,6 +91,9 @@ pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
     let stream = dev.rx_stream(&[channel])?;
     let current_sample_rate = Some(dev.sample_rate(Direction::Rx, channel)?);
     let frequency_ranges = dev.frequency_range(Direction::Rx, channel)?;
+    dev.set_gain(Direction::Rx, 0, 30.0)?;
+
+   // dev.set_gain_mode(Direction::Rx, 0, true)?;
 
     Ok(RtlDevice {
         device: dev,
@@ -95,7 +101,7 @@ pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
         current_sample_rate,
         rx_channel_cnt: rx_channels,
         frequency_ranges,
-        scratch: vec![Complex32::new(0.0, 0.0); 1024],
+        scratch: vec![Complex32::new(0.0, 0.0); READ_CHUNK_SAMPLES],
     })
 }
 
@@ -144,5 +150,11 @@ impl DeviceStream for RtlDevice {
 
     fn current_frequency(&self) -> EdgeResult<f64> {
         Ok(self.device.frequency(Direction::Rx, 0)?)
+    }
+
+    fn set_sample_rate(&mut self, sample_rate_hz: f64) -> EdgeResult<()> {
+        self.device.set_sample_rate(Direction::Rx, 0, sample_rate_hz)?;
+        self.current_sample_rate = Some(sample_rate_hz);
+        Ok(())
     }
 }

@@ -1,10 +1,8 @@
 use soapysdr::{Device, Direction};
 use soapysdr_sys::SoapySDRRange;
+use eli_protocol::router_vanilla::device_vanilla::{DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceDiscovery};
+use eli_protocol::router_vanilla::result_vanilla::RouterResult;
 
-use crate::router::registries::reg_vanilla::{
-    DeviceBackend, DeviceCapabilities, DeviceDescriptor, DeviceDiscovery,
-};
-use crate::RouterResult;
 
 pub struct RtlSdrDiscovery;
 
