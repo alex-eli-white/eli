@@ -1,11 +1,9 @@
-use std::ops::DerefMut;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 use eli_protocol::edge_vanilla::scanner::config_vanilla::{FixedModeConfig, Hit, HitDetectorConfig, ScannerConfig, ScannerMode, SweepModeConfig};
-use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{AnalysisResult, BinValueKind, EdgeEvent, FreqRange, IqCaptureMode, IqChunkMessage, MessageKind, PowerCtx, RecordCtx, RecordMessage, RecordMessageKind, SpectrumFrame, StatusMessage, WaterfallMessage};
 use eli_protocol::edge_vanilla::scanner::sweep_vanilla::SweepPolicy;
 
@@ -17,7 +15,7 @@ use crate::scanner::sweep_planner::SweepPlanner;
 
 
 use eli_protocol::edge_vanilla::result_vanilla::{EdgeError, EdgeResult};
-use crate::{HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, HZ_PER_MHZ, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
+use crate::{HOTSPOT_REPRIORITIZE_RADIUS_HZ, HOTSPOT_REPRIORITIZE_WEIGHT, POWER_EPSILON, SCANNER_SLEEP_TIME_MS};
 use crate::helpers::dc_dcb::power_to_db;
 use crate::scanner::stream_device::stream_vanilla::{DeviceStream};
 
@@ -74,7 +72,7 @@ impl ScannerRunner {
                     self.active_config.edge_id.clone(),
                     self.active_config.source_id.clone(),
                     "config_applied",
-                    &format!("active mode now {:?}", self.active_config.mode),
+                    format!("active mode now {:?}", self.active_config.mode),
                 )),
             );
 
@@ -87,6 +85,7 @@ impl ScannerRunner {
     fn try_emit(&self, edge_tx: &mpsc::Sender<EdgeEvent>, event: EdgeEvent) {
         if edge_tx.try_send(event).is_err() {
             let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("Dropped {} events", dropped);
         }
     }
 
@@ -431,8 +430,6 @@ impl ScannerRunner {
 
 
         loop {
-            let running = self.scanner_running.load(Ordering::SeqCst);
-            let mode = format!("{:?}", self.active_config.mode);
 
 
             if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -498,7 +495,7 @@ impl ScannerRunner {
     fn handle_capture_error<T>(
         &self,
         err: EdgeError,
-        center_hz: f64,
+        _center_hz: f64,
     ) -> EdgeResult<Option<T>> {
         if is_overflow_error(&err) {
             return Ok(None);

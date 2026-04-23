@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use clap::Parser;
 use eli_router::router::runtime::RouterRuntime;
 use eli_protocol::router_vanilla::result_vanilla::RouterError;

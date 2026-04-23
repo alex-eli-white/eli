@@ -24,8 +24,7 @@ pub fn analyze(samples: &[Complex32], center_hz: f64, sample_rate_hz: f64) -> An
     let lower_edge_hz = center_hz - half_span_hz;
     let upper_edge_hz = center_hz + half_span_hz;
     let estimated_peak_hz = lower_edge_hz + (peak_bin as f64 * bin_hz);
-
-    let input_power: f32 = samples.iter().map(|s| s.norm_sqr()).sum::<f32>() / samples.len() as f32;
+    
 
     AnalysisResult {
         avg_power,

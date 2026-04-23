@@ -27,45 +27,6 @@ impl RtlDevice {
 
 }
 
-// pub fn get_rtlsdr_devices(serial_number: &str) -> EdgeResult<Vec<RtlDevice>> {
-//     let results = soapysdr::enumerate(serial_number)?;
-//
-//     let mut devices = Vec::new();
-//
-//     for args in results {
-//
-//
-//
-//         let dev = Device::new(args)?;
-//
-//         let rx_channel = dev.num_channels(Direction::Rx)?;
-//         let rx = dev.rx_stream(&[rx_channel])?;
-//
-//         let current_sample_rate = if rx_channel > 0 {
-//             Some(dev.sample_rate(Direction::Rx, rx_channel)?)
-//         } else {
-//             None
-//         };
-//
-//         let frequency_ranges = if rx_channel > 0 {
-//             dev.frequency_range(Direction::Rx, rx_channel)?
-//         } else {
-//             Vec::new()
-//         };
-//
-//         devices.push(RtlDevice {
-//             device: dev.clone(),
-//             stream: rx,
-//             current_sample_rate,
-//             channels: rx_channel,
-//             frequency_ranges,
-//             scratch: vec![Complex32::new(0.0, 0.0); 1024],
-//         });
-//     }
-//
-//     Ok(devices)
-// }
-
 
 pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
     let results = soapysdr::enumerate(serial_number)?;
@@ -110,6 +71,11 @@ impl DeviceStream for RtlDevice {
     }
 
 
+    fn set_sample_rate(&mut self, sample_rate_hz: f64) -> EdgeResult<()> {
+        self.device.set_sample_rate(Direction::Rx, 0, sample_rate_hz)?;
+        self.current_sample_rate = Some(sample_rate_hz);
+        Ok(())
+    }
 
     fn discard_buffers(&mut self, count: i64, timeout_us: i64) -> Result<(), EdgeError> {
         for _ in 0..count {
@@ -148,11 +114,5 @@ impl DeviceStream for RtlDevice {
 
     fn current_frequency(&self) -> EdgeResult<f64> {
         Ok(self.device.frequency(Direction::Rx, 0)?)
-    }
-
-    fn set_sample_rate(&mut self, sample_rate_hz: f64) -> EdgeResult<()> {
-        self.device.set_sample_rate(Direction::Rx, 0, sample_rate_hz)?;
-        self.current_sample_rate = Some(sample_rate_hz);
-        Ok(())
     }
 }

@@ -1,4 +1,3 @@
-use std::ops::{Deref, DerefMut};
 use num_complex::Complex32;
 
 use eli_protocol::edge_vanilla::result_vanilla::{EdgeError, EdgeResult};

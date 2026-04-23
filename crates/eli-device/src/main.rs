@@ -4,12 +4,10 @@ use std::sync::{
 };
 
 use clap::Parser;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-
-
-
+use eli_device::helpers::writer_helper::writer_task_helper;
 use eli_protocol::edge_vanilla::result_vanilla::EdgeError;
 use eli_device::scanner::runner::ScannerRunner;
 use eli_device::scanner::stream_device::rtl::RtlDevice;
@@ -24,7 +22,7 @@ async fn main() -> Result<(), EdgeError> {
     let args = EdgeDeviceArgs::parse();
 
     let stream = UnixStream::connect(&args.socket_path).await?;
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
 
     let scanner_running = Arc::new(AtomicBool::new(false));
     let shutdown_requested = Arc::new(AtomicBool::new(false));
@@ -54,7 +52,7 @@ async fn main() -> Result<(), EdgeError> {
         dropped_events.clone(),
     );
 
-    let (event_tx, mut event_rx) = mpsc::channel::<EdgeEvent>(256);
+    let (event_tx, event_rx) = mpsc::channel::<EdgeEvent>(256);
 
     let _ = event_tx.try_send(EdgeEvent::Status(StatusMessage::new(
         initial_config.edge_id.clone(),
@@ -64,14 +62,9 @@ async fn main() -> Result<(), EdgeError> {
     )));
 
     let writer_task = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            let line = serde_json::to_string(&event)?;
-            write_half.write_all(line.as_bytes()).await?;
-            write_half.write_all(b"\n").await?;
-        }
-
-        Ok::<(), EdgeError>(())
-    });
+        writer_task_helper(write_half, event_rx).await
+    }
+    );
 
     let scanner_running_for_cmd = scanner_running.clone();
     let shutdown_requested_for_cmd = shutdown_requested.clone();

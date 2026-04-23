@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-
-use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent, StatusMessage};
+use eli_device::helpers::writer_helper::writer_task_helper;
+use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent};
 use eli_protocol::router_vanilla::cmd_vanilla::RouterEvent;
 use eli_protocol::router_vanilla::device_vanilla::DeviceIdentity;
 use eli_protocol::router_vanilla::result_vanilla::{RouterError, RouterResult};
@@ -32,6 +32,12 @@ pub struct WorkerHandle {
 
 pub struct WorkerRegistry {
     pub(crate) registry: HashMap<String, WorkerHandle>,
+}
+
+impl Default for WorkerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkerRegistry {
@@ -210,19 +216,13 @@ async fn handle_worker_connection(
     listener: UnixListener,
     worker_id: String,
     event_tx: mpsc::Sender<RouterEvent>,
-    mut command_rx: mpsc::Receiver<EdgeEvent>,
+    command_rx: mpsc::Receiver<EdgeEvent>,
 ) -> RouterResult<()> {
     let (stream, _) = listener.accept().await?;
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
 
     let writer = tokio::spawn(async move {
-        while let Some(cmd) = command_rx.recv().await {
-            let line = serde_json::to_string(&cmd)?;
-            write_half.write_all(line.as_bytes()).await?;
-            write_half.write_all(b"\n").await?;
-        }
-
-        Ok::<(), RouterError>(())
+        writer_task_helper(write_half, command_rx).await
     });
 
     let reader = tokio::spawn(async move {
