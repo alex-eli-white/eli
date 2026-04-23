@@ -19,38 +19,6 @@ use crate::router::genesis::rtl_genesis::RtlSdrDiscovery;
 use crate::router::registries::worker_registry::now_ms;
 
 
-// #[derive(Debug, Deserialize)]
-// #[serde(tag = "type")]
-// enum RouterCommand {
-//     #[serde(rename = "ping")]
-//     Ping,
-//
-//     #[serde(rename = "list_workers")]
-//     ListWorkers,
-//
-//     #[serde(rename = "stop_worker")]
-//     StopWorker { worker_id: String },
-//
-//     #[serde(rename = "start_worker")]
-//     StartWorker { worker_id: String },
-// }
-//
-// #[derive(Debug, Serialize)]
-// #[serde(tag = "type")]
-// enum RouterReply {
-//     #[serde(rename = "pong")]
-//     Pong,
-//
-//     #[serde(rename = "workers")]
-//     Workers { worker_ids: Vec<String> },
-//
-//     #[serde(rename = "ok")]
-//     Ok { message: String },
-//
-//     #[serde(rename = "error")]
-//     Error { message: String },
-// }
-
 pub struct RouterRuntime {
     pub socket_dir: PathBuf,
     pub edge_device_bin: PathBuf,
@@ -283,7 +251,6 @@ impl RouterRuntime {
                     match serde_json::to_string(&reply) {
                         Ok(json) => {
                             if let Err(err) = write_half.write_all(json.as_bytes()).await {
-                                eprintln!("[router] control write error: {}", err);
                                 return;
                             }
                             if let Err(err) = write_half.write_all(b"\n").await {
@@ -385,22 +352,7 @@ impl RouterRuntime {
                 continue;
             }
 
-            // println!(
-            //     "[router] spawning worker for backend={} serial={} label={:?} product={:?}",
-            //     device.backend,
-            //     device.serial_number,
-            //     descriptor.label,
-            //     descriptor.product,
-            // );
-
             let mut state = self.state.lock().await;
-
-            // println!(
-            //     "[router] discovered backend={} serial={} already_running={}",
-            //     device.backend,
-            //     device.serial_number,
-            //     already_running
-            // );
 
             state
                 .workers

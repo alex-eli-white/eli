@@ -77,8 +77,6 @@ pub fn open_rtlsdr_by_serial(serial_number: &str) -> EdgeResult<RtlDevice> {
 
     let dev = Device::new(args)?;
 
-    eprintln!("driver={}", dev.driver_key()?);
-    eprintln!("hardware={}", dev.hardware_key()?);
 
     let rx_channels = dev.num_channels(Direction::Rx)?;
     if rx_channels == 0 {

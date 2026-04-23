@@ -97,7 +97,6 @@ async fn main() -> Result<(), EdgeError> {
                                 let mut guard = pending_config_for_cmd.lock().unwrap();
                                 *guard = Some(cfg);
                             }
-                            eprintln!("[worker] pending_config set");
 
                             {
                                 let mut identity = status_identity_for_cmd.lock().unwrap();
@@ -211,13 +210,7 @@ async fn main() -> Result<(), EdgeError> {
     });
 
     let scanner_task = tokio::task::spawn_blocking(move || -> Result<(), EdgeError> {
-        eprintln!("[scanner] runner thread starting");
-
-
-
         runner.run_edge_loop(event_tx.clone())?;
-
-        eprintln!("[scanner] runner exited cleanly");
         Ok(())
     });
 

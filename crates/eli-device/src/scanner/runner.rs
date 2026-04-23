@@ -65,7 +65,6 @@ impl ScannerRunner {
         };
 
         if let Some(new_cfg) = new_cfg {
-            eprintln!("[scanner] applying pending config: {:?}", new_cfg.mode);
 
             self.active_config = new_cfg;
 
@@ -88,12 +87,6 @@ impl ScannerRunner {
     fn try_emit(&self, edge_tx: &mpsc::Sender<EdgeEvent>, event: EdgeEvent) {
         if edge_tx.try_send(event).is_err() {
             let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
-            if dropped.is_multiple_of(100) {
-                eprintln!(
-                    "edge event backpressure: dropped_events={} edge_id={} source_id={}",
-                    dropped, self.active_config.edge_id, self.active_config.source_id
-                );
-            }
         }
     }
 
@@ -279,13 +272,9 @@ impl ScannerRunner {
 
         self.stream.set_sample_rate(self.active_config.sample_rate_hz)?;
 
-        eprintln!(
-            "[scanner] configured sample rate now {}",
-            self.stream.current_sample_rate()?
-        );
+
 
         while let Some(point) = planner.pop_next() {
-            eprintln!("[sweep] point center_hz={}", point.center_hz);
             if self.shutdown_requested.load(Ordering::Relaxed) {
                 break;
             }
@@ -305,20 +294,9 @@ impl ScannerRunner {
                 &settle,
             ) {
                 Ok(samples) => {
-                    eprintln!(
-                        "[sweep] capture_ok center_hz={} samples={}",
-                        point.center_hz,
-                        samples.len()
-                    );
                     samples
                 }
                 Err(err) => {
-                    eprintln!(
-                        "[sweep] capture_err center_hz={} err={}",
-                        point.center_hz,
-                        err
-                    );
-
                     match self.handle_capture_error(err, point.center_hz)? {
                         Some(samples) => samples,
                         None => continue,
@@ -512,12 +490,6 @@ impl ScannerRunner {
                     std::thread::sleep(Duration::from_millis(SCANNER_SLEEP_TIME_MS));
                 }
             }
-
-            eprintln!(
-                "[scanner] tick running={} mode={:?}",
-                self.scanner_running.load(Ordering::SeqCst),
-                self.active_config.mode
-            );
         }
 
         Ok(())
@@ -529,10 +501,6 @@ impl ScannerRunner {
         center_hz: f64,
     ) -> EdgeResult<Option<T>> {
         if is_overflow_error(&err) {
-            eprintln!(
-                "scanner overflow at {:.3} MHz; continuing",
-                center_hz / HZ_PER_MHZ
-            );
             return Ok(None);
         }
 
