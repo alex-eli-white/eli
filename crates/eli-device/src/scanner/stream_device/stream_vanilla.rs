@@ -1,8 +1,8 @@
 use std::ops::{Deref, DerefMut};
 use num_complex::Complex32;
 
-use crate::edge_error::EdgeError;
-use crate::EdgeResult;
+use eli_protocol::edge_vanilla::result_vanilla::{EdgeError, EdgeResult};
+
 
 pub trait DeviceStream: Send {
     fn set_frequency(&mut self, freq_hz: f64) -> EdgeResult<()>;

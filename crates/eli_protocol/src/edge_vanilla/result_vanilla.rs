@@ -1,6 +1,10 @@
 use std::fmt::{Display, Formatter};
 use std::io::Error;
 
+
+
+pub type EdgeResult<T> = Result<T, EdgeError>;
+
 #[derive(Debug)]
 pub enum EdgeError {
     Io(std::io::Error),

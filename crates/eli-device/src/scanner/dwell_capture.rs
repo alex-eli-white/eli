@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use num_complex::Complex32;
 use serde::{Deserialize, Serialize};
+use eli_protocol::edge_vanilla::result_vanilla::EdgeResult;
 use eli_protocol::edge_vanilla::scanner::config_vanilla::DEFAULT_SAMPLE_TIMEOUT;
 use eli_protocol::edge_vanilla::scanner::dwell_vanilla::SettleStrategy;
-use crate::EdgeResult;
+
 use crate::scanner::stream_device::stream_vanilla::{DeviceStream};
 
 pub fn dwell_capture(

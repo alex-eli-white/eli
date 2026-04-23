@@ -2,8 +2,8 @@ use num_complex::Complex32;
 use soapysdr::{Device, Direction};
 use soapysdr_sys::SoapySDRRange;
 
-use crate::edge_error::EdgeError;
-use crate::{EdgeResult, READ_CHUNK_SAMPLES};
+use eli_protocol::edge_vanilla::result_vanilla::{EdgeError, EdgeResult};
+use crate::{READ_CHUNK_SAMPLES};
 use crate::scanner::stream_device::stream_vanilla::DeviceStream;
 
 

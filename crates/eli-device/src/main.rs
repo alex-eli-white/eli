@@ -9,11 +9,12 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 
-use eli_device::scanner::args_vanilla::{DeviceKindArg, EdgeDeviceArgs};
-use eli_device::edge_error::EdgeError;
+
+use eli_protocol::edge_vanilla::result_vanilla::EdgeError;
 use eli_device::scanner::runner::ScannerRunner;
 use eli_device::scanner::stream_device::rtl::RtlDevice;
 use eli_device::scanner::stream_device::stream_vanilla::DeviceStream;
+use eli_protocol::edge_vanilla::scanner::cmd_vanilla::{DeviceKindArg, EdgeDeviceArgs};
 use eli_protocol::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::{EdgeEvent, StatusMessage};
 
