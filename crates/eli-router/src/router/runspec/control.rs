@@ -135,6 +135,7 @@ impl IoCtl {
             let mut state = self.state.lock().await;
             let _ = state.workers.prune_exited().await?;
         }
+        //lock drops
 
         for descriptor in discovered {
             let Some(device) = DeviceCtl::descriptor_to_identity(&descriptor) else {
@@ -145,30 +146,32 @@ impl IoCtl {
                 let state = self.state.lock().await;
                 state.workers.contains_device(&device)
             };
+            //lock drops
 
             if already_running {
                 continue;
             }
 
-            let mut state = self.state.lock().await;
 
             let tx = self
                 .ctl_tx
                 .take()
                 .ok_or_else(|| RouterError::Message("ingress task already started".to_string()))?;
 
-            let edge_device_bin = state.edge_device_bin.clone();
-            let socket_dir = state.socket_dir.clone();
+            let (edge_device_bin, socket_dir) = {
+                let state = self.state.lock().await;
+                (state.edge_device_bin.clone(), state.socket_dir.clone())
+            };
 
-            state
-                .workers
-                .spawn_edge_worker(
-                    &edge_device_bin,
-                    &socket_dir,
-                    device,
-                    tx.clone(),
-                )
-                .await?;
+            let mut state = self.state.lock().await;
+            state.workers.spawn_edge_worker(
+                &edge_device_bin,
+                &socket_dir,
+                device,
+                tx.clone(),
+            ).await?;
+
+
         }
 
         Ok(())

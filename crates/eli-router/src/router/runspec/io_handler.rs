@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex};
 
 use eli_protocol::edge_vanilla::scanner::msg_vanilla::EdgeEvent;
 use eli_protocol::router_vanilla::cmd_vanilla::{RouterCommand, RouterReply};
 use eli_protocol::router_vanilla::result_vanilla::RouterResult;
 
-use crate::router::runspec::config_helper::{fixed_config, fm_sweep_config, idle_config};
+
 use crate::router::flux::state::RouterState;
 
 
@@ -78,28 +78,8 @@ pub async fn handle_router_command(
             send_worker_event(state, worker_id, EdgeEvent::Start, "start").await
         }
 
-        RouterCommand::SetIdle { worker_id } => {
-            let cfg = idle_config(&worker_id);
-            send_worker_event(state, worker_id, EdgeEvent::SetConfig(cfg), "idle config").await
-        }
-
-        RouterCommand::SetSweepFm { worker_id } => {
-            let cfg = fm_sweep_config(&worker_id);
-            send_worker_event(state, worker_id, EdgeEvent::SetConfig(cfg), "fm sweep config").await
-        }
-
-        RouterCommand::SetFixed {
-            worker_id,
-            center_hz,
-        } => {
-            let cfg = fixed_config(&worker_id, center_hz);
-            send_worker_event(
-                state,
-                worker_id,
-                EdgeEvent::SetConfig(cfg),
-                &format!("fixed config ({:.3} MHz)", center_hz / 1e6),
-            )
-                .await
+        RouterCommand::SetConfig { worker_id , config} => {
+            send_worker_event(state, worker_id, EdgeEvent::SetConfig(*config), "set config").await
         }
     }
 }

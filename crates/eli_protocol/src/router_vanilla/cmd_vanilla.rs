@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::edge_vanilla::scanner::config_vanilla::ScannerConfig;
 use crate::edge_vanilla::scanner::msg_vanilla::EdgeEvent;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,14 +17,9 @@ pub enum RouterCommand {
     #[serde(rename = "start_worker")]
     StartWorker { worker_id: String },
 
-    #[serde(rename = "set_idle")]
-    SetIdle { worker_id: String },
+    #[serde(rename = "set_config")]
+    SetConfig { worker_id: String, config : Box<ScannerConfig> },
 
-    #[serde(rename = "set_sweep_fm")]
-    SetSweepFm { worker_id: String },
-
-    #[serde(rename = "set_fixed")]
-    SetFixed { worker_id: String, center_hz: f64 },
 }
 
 
