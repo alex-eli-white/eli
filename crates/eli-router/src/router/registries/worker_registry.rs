@@ -149,17 +149,6 @@ impl WorkerRegistry {
             let _ = std::fs::remove_file(&socket_path);
         }
 
-        println!("[router] cwd: {:?}", std::env::current_dir()?);
-        println!("[router] edge binary exists? {}", edge_device_bin.exists());
-        println!(
-            "[router] edge binary canonical: {:?}",
-            std::fs::canonicalize(edge_device_bin)
-        );
-        println!("[router] worker socket path: {:?}", socket_path);
-        println!(
-            "[router] worker socket parent exists? {}",
-            socket_path.parent().map(|p| p.exists()).unwrap_or(false)
-        );
 
         let listener = UnixListener::bind(&socket_path)?;
         let socket_path_str = socket_path.to_string_lossy().to_string();
@@ -179,8 +168,7 @@ impl WorkerRegistry {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        println!("[router] spawning command: {:?}", cmd);
-
+        
         let child = cmd.spawn()?;
 
         let (command_tx, command_rx) = mpsc::channel(256);

@@ -3,4 +3,5 @@ pub mod genesis;
 pub mod registries;
 pub mod runtime;
 
-pub mod config_helper;
+pub mod runspec;
+
